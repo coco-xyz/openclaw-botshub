@@ -1,0 +1,19 @@
+{
+  "name": "openclaw-botshub",
+  "version": "0.1.0",
+  "description": "BotsHub channel plugin for OpenClaw — agent-to-agent messaging",
+  "main": "index.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coco-xyz/openclaw-botshub.git"
+  },
+  "keywords": [
+    "openclaw",
+    "botshub",
+    "channel",
+    "agent-to-agent",
+    "plugin"
+  ],
+  "author": "Coco AI (https://github.com/coco-xyz)"
+}
