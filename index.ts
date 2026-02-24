@@ -25,6 +25,9 @@ function resolveBotshubConfig(cfg: any): BotshubChannelConfig {
 const MAX_SEND_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
 
+// P3-3 (R2): UUIDv4-ish pattern for channel_id validation (prevents path traversal)
+const CHANNEL_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
 /** Helper: make an authenticated request to the BotsHub API with rate-limit retry. */
 async function hubFetch(
   bh: BotshubChannelConfig,
@@ -32,11 +35,14 @@ async function hubFetch(
   init: RequestInit,
 ): Promise<Response> {
   const url = `${bh.hubUrl!.replace(/\/$/, "")}${path}`;
-  const headers = {
-    "Content-Type": "application/json",
+  // P3-1 (R2): Only set Content-Type for requests with a body
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${bh.agentToken}`,
     ...(init.headers as Record<string, string> ?? {}),
   };
+  if (init.body) {
+    headers["Content-Type"] = "application/json";
+  }
 
   for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
     const resp = await fetch(url, { ...init, headers });
@@ -54,8 +60,8 @@ async function hubFetch(
     const body = await resp.text().catch(() => "");
     throw new Error(`BotsHub ${path} failed: ${resp.status} ${body}`);
   }
-
-  throw new Error(`BotsHub ${path} failed: max retries exceeded`);
+  // Unreachable: loop always returns or throws. Kept for TypeScript return-type safety.
+  throw new Error(`BotsHub ${path} failed: exhausted retries`);
 }
 
 /** Send a DM to an agent by name (auto-creates direct channel). */
@@ -77,6 +83,13 @@ async function sendToBotsHub(params: {
   return { ok: true, messageId: result?.message?.id };
 }
 
+/** P2-2 (R2): Validate channel_id to prevent path traversal. */
+function assertSafeChannelId(channelId: string): void {
+  if (!CHANNEL_ID_RE.test(channelId)) {
+    throw new Error(`Invalid channel_id: ${channelId.slice(0, 40)}`);
+  }
+}
+
 /** Send a message to a specific channel by ID. */
 async function sendToChannel(params: {
   cfg: any;
@@ -87,6 +100,7 @@ async function sendToChannel(params: {
   if (!bh.hubUrl || !bh.agentToken) {
     throw new Error("BotsHub not configured (missing hubUrl or agentToken)");
   }
+  assertSafeChannelId(params.channelId);
 
   const resp = await hubFetch(bh, `/api/channels/${params.channelId}/messages`, {
     method: "POST",
@@ -98,6 +112,7 @@ async function sendToChannel(params: {
 
 /** Fetch channel metadata to determine type (direct vs group). */
 async function fetchChannelInfo(bh: BotshubChannelConfig, channelId: string): Promise<{ type: string; name: string | null } | null> {
+  assertSafeChannelId(channelId);
   try {
     const resp = await hubFetch(bh, `/api/channels/${channelId}`, { method: "GET" });
     const data = (await resp.json()) as any;
@@ -148,17 +163,18 @@ const botshubChannel = {
   outbound: {
     deliveryMode: "direct" as const,
     textChunkLimit: 8000,
+    // P3-2 (R2): Support both DM (agent name) and channel (channel_id) targets.
+    // If `to` matches channel ID format, send to channel; otherwise DM by name.
     sendText: async (params: {
       cfg: any;
       to: string;
       text: string;
       accountId?: string;
     }) => {
-      const result = await sendToBotsHub({
-        cfg: params.cfg,
-        to: params.to,
-        text: params.text,
-      });
+      const isChannelId = CHANNEL_ID_RE.test(params.to) && params.to.length > 20;
+      const result = isChannelId
+        ? await sendToChannel({ cfg: params.cfg, channelId: params.to, text: params.text })
+        : await sendToBotsHub({ cfg: params.cfg, to: params.to, text: params.text });
       return { channel: "botshub" as const, ...result };
     },
   },
@@ -222,11 +238,19 @@ async function handleInboundWebhook(req: any, res: any) {
     content     = msg?.content;
     message_id  = msg?.id;
 
-    // P2-2: v1 payload lacks channel type — resolve via API
+    // v1 payload lacks channel type — resolve via API
     if (channel_id) {
       const channelInfo = await fetchChannelInfo(bh, channel_id);
-      chat_type  = channelInfo?.type;
-      group_name = channelInfo?.name ?? undefined;
+      if (channelInfo) {
+        chat_type  = channelInfo.type;
+        group_name = channelInfo.name ?? undefined;
+      } else {
+        // P2-1 (R2): API lookup failed — default to channel-based reply to avoid
+        // silently misrouting group messages as DMs
+        console.warn(`[botshub] fetchChannelInfo failed for ${channel_id}, defaulting to channel-based reply`);
+        chat_type  = "group";
+        group_name = undefined;
+      }
     }
   } else {
     // Legacy flat format (pre-GA servers)
