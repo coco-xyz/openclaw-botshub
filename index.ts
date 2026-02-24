@@ -22,6 +22,9 @@ function resolveBotshubConfig(cfg: any): BotshubChannelConfig {
 }
 
 // ─── Outbound: send message to BotsHub ───────────────────────
+const MAX_SEND_RETRIES = 2;
+const RETRY_BASE_MS = 1000;
+
 async function sendToBotsHub(params: {
   cfg: any;
   to: string;
@@ -33,26 +36,41 @@ async function sendToBotsHub(params: {
   }
 
   const url = `${bh.hubUrl.replace(/\/$/, "")}/api/send`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${bh.agentToken}`,
-    },
-    body: JSON.stringify({
-      to: params.to,
-      content: params.text,
-      content_type: "text",
-    }),
+  const reqBody = JSON.stringify({
+    to: params.to,
+    content: params.text,
+    content_type: "text",
   });
 
-  if (!resp.ok) {
+  for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bh.agentToken}`,
+      },
+      body: reqBody,
+    });
+
+    if (resp.ok) {
+      const result = (await resp.json()) as any;
+      return { ok: true, messageId: result?.message?.id };
+    }
+
+    // Rate limited — respect Retry-After header
+    if (resp.status === 429 && attempt < MAX_SEND_RETRIES) {
+      const retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10);
+      const delayMs = (retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_MS * (attempt + 1));
+      console.warn(`[botshub] rate limited, retrying in ${delayMs}ms (attempt ${attempt + 1})`);
+      await new Promise((r) => setTimeout(r, delayMs));
+      continue;
+    }
+
     const body = await resp.text().catch(() => "");
     throw new Error(`BotsHub send failed: ${resp.status} ${body}`);
   }
 
-  const result = (await resp.json()) as any;
-  return { ok: true, messageId: result?.message?.id };
+  throw new Error("BotsHub send failed: max retries exceeded");
 }
 
 // ─── Channel Plugin ──────────────────────────────────────────
@@ -152,15 +170,37 @@ async function handleInboundWebhook(req: any, res: any) {
     body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
   }
 
-  const {
-    channel_id,
-    sender_name,
-    sender_id,
-    content,
-    message_id,
-    chat_type,
-    group_name,
-  } = body;
+  // Support both v1 envelope (webhook_version: '1') and legacy flat format
+  let channel_id: string | undefined;
+  let sender_name: string | undefined;
+  let sender_id: string | undefined;
+  let content: string | undefined;
+  let message_id: string | undefined;
+  let chat_type: string | undefined;
+  let group_name: string | undefined;
+
+  if (body.webhook_version === '1' || body.message) {
+    // v1 envelope: { webhook_version, type, channel_id, message: WireMessage, sender_name }
+    const msg = body.message;
+    channel_id  = body.channel_id;
+    sender_name = body.sender_name;
+    sender_id   = msg?.sender_id;
+    content     = msg?.content;
+    message_id  = msg?.id;
+    // channel type/name not in v1 payload — infer from channel member count
+    // For now, default to 'direct'; group detection via channel_id lookup if needed
+    chat_type   = undefined;
+    group_name  = undefined;
+  } else {
+    // Legacy flat format (pre-GA servers)
+    channel_id  = body.channel_id;
+    sender_name = body.sender_name;
+    sender_id   = body.sender_id;
+    content     = body.content;
+    message_id  = body.message_id;
+    chat_type   = body.chat_type;
+    group_name  = body.group_name;
+  }
 
   if (!content || !sender_name) {
     res.writeHead(400, { "Content-Type": "application/json" });
