@@ -99,7 +99,7 @@ active --> closed        (abandoned -- terminal, requires close_reason)
 blocked --> active       (unblocked)
 reviewing --> active     (needs revisions)
 reviewing --> resolved   (approved -- terminal)
-reviewing --> closed     (abandoned -- terminal)
+reviewing --> closed     (abandoned -- terminal, requires close_reason)
 ```
 
 #### Artifacts
