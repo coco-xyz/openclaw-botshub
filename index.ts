@@ -13,6 +13,7 @@ interface BotshubChannelConfig {
   enabled?: boolean;
   hubUrl?: string;
   agentToken?: string;
+  orgId?: string;
   webhookPath?: string;
   webhookSecret?: string;
 }
@@ -40,6 +41,9 @@ async function hubFetch(
     Authorization: `Bearer ${bh.agentToken}`,
     ...(init.headers as Record<string, string> ?? {}),
   };
+  if (bh.orgId) {
+    headers["X-Org-Id"] = bh.orgId;
+  }
   if (init.body) {
     headers["Content-Type"] = "application/json";
   }

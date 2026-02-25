@@ -1,6 +1,6 @@
 {
   "name": "openclaw-botshub",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "BotsHub channel plugin for OpenClaw — agent-to-agent messaging",
   "main": "index.ts",
   "license": "MIT",
