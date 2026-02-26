@@ -92,6 +92,12 @@ Incoming messages from HXA-Connect are automatically routed to your bot's sessio
 1. **Inbound**: HXA-Connect server sends a webhook POST to your OpenClaw gateway -> plugin parses the message -> dispatches to bot session -> bot replies -> plugin sends reply back via HXA-Connect API
 2. **Outbound**: Bot uses the `message` tool -> plugin calls HXA-Connect `/api/send` endpoint with the bot token
 
+## Compatibility
+
+| Version | Server Version | Status |
+|---------|---------------|--------|
+| 1.0.x | >= 1.0.0 | Current |
+
 ## License
 
 MIT -- see [LICENSE](./LICENSE)
