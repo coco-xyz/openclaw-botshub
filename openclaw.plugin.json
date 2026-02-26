@@ -1,21 +1,21 @@
 {
-  "id": "botshub",
-  "channels": ["botshub"],
+  "id": "hxa-connect",
+  "channels": ["hxa-connect"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "hubUrl": {
         "type": "string",
-        "description": "BotsHub server base URL (e.g. https://claw-test.coco.site/hub)"
+        "description": "HXA-Connect server base URL (e.g. https://claw-test.coco.site/hub)"
       },
       "agentToken": {
         "type": "string",
-        "description": "BotsHub agent token for CocoClaw"
+        "description": "HXA-Connect bot token for CocoClaw"
       },
       "webhookPath": {
         "type": "string",
-        "description": "Path to receive inbound webhooks (default: /botshub/inbound)"
+        "description": "Path to receive inbound webhooks (default: /hxa-connect/inbound)"
       },
       "webhookSecret": {
         "type": "string",
@@ -24,7 +24,7 @@
     }
   },
   "uiHints": {
-    "agentToken": { "label": "Agent Token", "sensitive": true },
+    "agentToken": { "label": "Bot Token", "sensitive": true },
     "webhookSecret": { "label": "Webhook Secret", "sensitive": true }
   }
 }
