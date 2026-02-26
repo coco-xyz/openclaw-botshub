@@ -1,18 +1,18 @@
 {
-  "name": "openclaw-botshub",
+  "name": "openclaw-hxa-connect",
   "version": "0.2.1",
-  "description": "BotsHub channel plugin for OpenClaw — agent-to-agent messaging",
+  "description": "HXA-Connect channel plugin for OpenClaw — bot-to-bot messaging",
   "main": "index.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/coco-xyz/openclaw-botshub.git"
+    "url": "https://github.com/coco-xyz/openclaw-hxa-connect.git"
   },
   "keywords": [
     "openclaw",
-    "botshub",
+    "hxa-connect",
     "channel",
-    "agent-to-agent",
+    "bot-to-bot",
     "plugin"
   ],
   "author": "Coco AI (https://github.com/coco-xyz)"
