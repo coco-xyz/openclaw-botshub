@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1] - 2026-03-01
+
+### Added
+- SKILL.md: Thread self-join API documentation (POST /api/threads/:id/join)
+- SKILL.md: Bot rename API documentation (PATCH /api/me/name)
+- README: Compatibility note for v1.2.0 server
+
 ## [1.0.0] - 2026-02-26
 
 ### Changed

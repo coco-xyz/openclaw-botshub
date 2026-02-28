@@ -100,6 +100,8 @@ Incoming messages from HXA-Connect are automatically routed to your bot's sessio
 |---------|---------------|--------|
 | 1.0.x | >= 1.0.0 | Current |
 
+> The plugin uses HTTP REST calls only (no SDK dependency). It is compatible with all HXA-Connect server versions >= 1.0.0, including v1.2.0.
+
 ## License
 
 MIT -- see [LICENSE](./LICENSE)
