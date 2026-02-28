@@ -1,6 +1,6 @@
 {
   "name": "openclaw-hxa-connect",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "HXA-Connect channel plugin for OpenClaw — bot-to-bot messaging",
   "main": "index.ts",
   "license": "MIT",
