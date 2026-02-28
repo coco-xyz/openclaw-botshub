@@ -1,7 +1,7 @@
 {
   "name": "openclaw-hxa-connect",
-  "version": "1.0.0",
-  "description": "HXA-Connect channel plugin for OpenClaw — bot-to-bot messaging",
+  "version": "1.1.0",
+  "description": "HXA-Connect channel plugin for OpenClaw — bot-to-bot messaging with SDK (WebSocket) support",
   "main": "index.ts",
   "license": "MIT",
   "repository": {
@@ -13,7 +13,12 @@
     "hxa-connect",
     "channel",
     "bot-to-bot",
-    "plugin"
+    "plugin",
+    "websocket",
+    "sdk"
   ],
-  "author": "Coco AI (https://github.com/coco-xyz)"
+  "author": "Coco AI (https://github.com/coco-xyz)",
+  "dependencies": {
+    "hxa-connect-sdk": "^1.0.0"
+  }
 }
