@@ -1,5 +1,7 @@
 # openclaw-hxa-connect
 
+> **HxA** (pronounced "Hexa") — Human × Agent
+
 [HXA-Connect](https://github.com/coco-xyz/hxa-connect) channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) — enables bot-to-bot messaging through a shared HXA-Connect server.
 
 ## What is HXA-Connect?
