@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi, PluginRuntime, ClawdbotConfig } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, PluginRuntime } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 // ─── Runtime singleton ───────────────────────────────────────
@@ -88,6 +88,12 @@ function resolveAccountConfig(cfg: any, accountId?: string): HxaAccountConfig {
   return accounts[id] || accounts[Object.keys(accounts)[0]] || {};
 }
 
+/** Count total configured accounts (for display prefix logic). */
+function countConfiguredAccounts(cfg: any): number {
+  const hxa = resolveHxaConnectConfig(cfg);
+  return Object.keys(resolveAccounts(hxa)).length;
+}
+
 // ─── Access Control ──────────────────────────────────────────
 
 function isDmAllowed(access: HxaAccessConfig | undefined, senderName: string): boolean {
@@ -122,6 +128,14 @@ function isSenderAllowed(
 const MAX_SEND_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
 const CHANNEL_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Validate a path segment to prevent path traversal. */
+function assertSafePathSegment(value: string, label: string): void {
+  if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
+    throw new Error(`Invalid ${label}: ${value?.slice(0, 40)}`);
+  }
+}
 
 /** Make an authenticated request to the HXA-Connect API with rate-limit retry. */
 async function hubFetch(
@@ -129,7 +143,10 @@ async function hubFetch(
   path: string,
   init: RequestInit,
 ): Promise<Response> {
-  const url = `${acct.hubUrl!.replace(/\/$/, "")}${path}`;
+  if (!acct.hubUrl || !acct.hubUrl.startsWith("http")) {
+    throw new Error("HXA-Connect hubUrl not configured or invalid");
+  }
+  const url = `${acct.hubUrl.replace(/\/$/, "")}${path}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${acct.agentToken}`,
     ...((init.headers as Record<string, string>) ?? {}),
@@ -187,19 +204,13 @@ async function sendToThread(
   if (!acct.hubUrl || !acct.agentToken) {
     throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
+  assertSafePathSegment(threadId, "thread_id");
   const resp = await hubFetch(acct, `/api/threads/${threadId}/messages`, {
     method: "POST",
     body: JSON.stringify({ content: text, content_type: "text" }),
   });
   const result = (await resp.json()) as any;
   return { ok: true, messageId: result?.message?.id };
-}
-
-/** Validate channel_id to prevent path traversal. */
-function assertSafeChannelId(channelId: string): void {
-  if (!CHANNEL_ID_RE.test(channelId)) {
-    throw new Error(`Invalid channel_id: ${channelId.slice(0, 40)}`);
-  }
 }
 
 /** Send a message to a specific channel by ID. */
@@ -211,7 +222,9 @@ async function sendToChannel(
   if (!acct.hubUrl || !acct.agentToken) {
     throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
-  assertSafeChannelId(channelId);
+  if (!CHANNEL_ID_RE.test(channelId)) {
+    throw new Error(`Invalid channel_id: ${channelId.slice(0, 40)}`);
+  }
   const resp = await hubFetch(acct, `/api/channels/${channelId}/messages`, {
     method: "POST",
     body: JSON.stringify({ content: text, content_type: "text" }),
@@ -225,7 +238,7 @@ async function fetchChannelInfo(
   acct: HxaAccountConfig,
   channelId: string,
 ): Promise<{ type: string; name: string | null } | null> {
-  assertSafeChannelId(channelId);
+  if (!CHANNEL_ID_RE.test(channelId)) return null;
   try {
     const resp = await hubFetch(acct, `/api/channels/${channelId}`, { method: "GET" });
     const data = (await resp.json()) as any;
@@ -248,37 +261,26 @@ interface WsConnection {
 const wsConnections = new Map<string, WsConnection>();
 
 /** Format display prefix for log/message context. */
-function displayPrefix(accountId: string): string {
-  if (wsConnections.size <= 1 && accountId === "default") return "HXA-Connect";
+function displayPrefix(accountId: string, cfg: any): string {
+  const totalAccounts = countConfiguredAccounts(cfg);
+  if (totalAccounts <= 1 && accountId === "default") return "HXA-Connect";
   return `HXA:${accountId}`;
 }
 
-/** Start WebSocket connections for all configured accounts. */
-async function startWebSocketConnections(cfg: any, log: any) {
-  const hxa = resolveHxaConnectConfig(cfg);
-  const accounts = resolveAccounts(hxa);
-
-  for (const [accountId, acct] of Object.entries(accounts)) {
-    if (acct.enabled === false) continue;
-    if (!acct.hubUrl || !acct.agentToken) {
-      log?.warn?.(`[hxa-connect:${accountId}] Skipping — missing hubUrl or agentToken`);
-      continue;
-    }
-    if (acct.useWebSocket === false) {
-      log?.info?.(`[hxa-connect:${accountId}] WebSocket disabled, using webhook only`);
-      continue;
-    }
-
-    try {
-      await connectAccount(accountId, acct, cfg, log);
-    } catch (err: any) {
-      log?.error?.(`[hxa-connect:${accountId}] WebSocket connection failed: ${err.message}`);
-    }
+async function connectAccount(
+  accountId: string,
+  acct: HxaAccountConfig,
+  cfg: any,
+  log: any,
+  abortSignal?: AbortSignal,
+) {
+  // Guard against duplicate connections
+  if (wsConnections.has(accountId)) {
+    log?.warn?.(`[hxa-connect:${accountId}] Already connected, skipping`);
+    return;
   }
-}
 
-async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: any, log: any) {
-  // Dynamic import SDK (it's ESM)
+  // Dynamic import SDK
   let HxaConnectClient: any;
   let ThreadContext: any;
   try {
@@ -290,7 +292,7 @@ async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: an
     return;
   }
 
-  const dp = displayPrefix(accountId);
+  const dp = displayPrefix(accountId, cfg);
   const lp = `[hxa-connect:${accountId}]`;
 
   const client = new HxaConnectClient({
@@ -305,7 +307,7 @@ async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: an
     },
   });
 
-  const isSelf = (id: string) => acct.agentId && id === acct.agentId;
+  const isSelf = (id: string) => !!(acct.agentId && id === acct.agentId);
   const access = acct.access || {};
 
   // ─── DM Handler ──────────────────────────────────────────
@@ -412,7 +414,9 @@ async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: an
     if (isSelf(message.sender_id)) return;
     const sender = message.sender_name || message.sender_id || "unknown";
     const content = message.content || "";
-    log?.debug?.(`${lp} Thread ${msg.thread_id} from ${sender} (buffered): ${content.substring(0, 80)}`);
+    log?.debug?.(
+      `${lp} Thread ${msg.thread_id} from ${sender} (buffered): ${content.substring(0, 80)}`,
+    );
   });
 
   // Thread lifecycle events
@@ -529,6 +533,20 @@ async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: an
     log?.error?.(`${lp} Error: ${err?.message || err}`);
   });
 
+  // Listen for abort signal to disconnect gracefully
+  if (abortSignal) {
+    abortSignal.addEventListener(
+      "abort",
+      () => {
+        log?.info?.(`${lp} Abort signal received, disconnecting`);
+        threadCtx.stop();
+        client.disconnect();
+        wsConnections.delete(accountId);
+      },
+      { once: true },
+    );
+  }
+
   // Connect
   log?.info?.(`${lp} Connecting as "${agentName}" to ${acct.hubUrl}`);
   await client.connect();
@@ -546,15 +564,6 @@ async function connectAccount(accountId: string, acct: HxaAccountConfig, cfg: an
       client.disconnect();
     },
   });
-}
-
-/** Stop all WebSocket connections. */
-function stopWebSocketConnections() {
-  for (const [id, conn] of wsConnections) {
-    console.log(`[hxa-connect:${id}] Disconnecting...`);
-    conn.disconnect();
-  }
-  wsConnections.clear();
 }
 
 // ─── Inbound Dispatch (shared by WS + Webhook) ──────────────
@@ -584,7 +593,6 @@ async function dispatchInbound(params: InboundParams) {
     chatType,
     groupSubject,
     replyTarget,
-    displayPrefix: dp,
   } = params;
 
   const from = `hxa-connect:${senderId}`;
@@ -665,7 +673,6 @@ async function dispatchInbound(params: InboundParams) {
 }
 
 // ─── Channel Plugin ──────────────────────────────────────────
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const hxaConnectChannel = {
   id: "hxa-connect" as const,
@@ -691,8 +698,7 @@ const hxaConnectChannel = {
   config: {
     listAccountIds: (cfg: any) => {
       const hxa = resolveHxaConnectConfig(cfg);
-      const accounts = resolveAccounts(hxa);
-      return Object.keys(accounts);
+      return Object.keys(resolveAccounts(hxa));
     },
     resolveAccount: (cfg: any, accountId?: string) => {
       const acct = resolveAccountConfig(cfg, accountId);
@@ -748,27 +754,29 @@ const hxaConnectChannel = {
     startAccount: async (ctx: any) => {
       const acct = resolveAccountConfig(ctx.cfg, ctx.accountId);
       const log = ctx.log;
-      log?.info?.(`hxa-connect: starting account ${ctx.accountId || "default"}`);
-      ctx.setStatus?.({ accountId: ctx.accountId || "default" });
+      const accountId = ctx.accountId || "default";
+      log?.info?.(`hxa-connect: starting account ${accountId}`);
+      ctx.setStatus?.({ accountId });
 
       // Start WebSocket connection for this account
       if (acct.useWebSocket !== false && acct.hubUrl && acct.agentToken) {
         try {
-          await connectAccount(ctx.accountId || "default", acct, ctx.cfg, log);
+          await connectAccount(accountId, acct, ctx.cfg, log, ctx.abortSignal);
         } catch (err: any) {
           log?.warn?.(
-            `hxa-connect: WebSocket failed for ${ctx.accountId || "default"}: ${err.message}. Falling back to webhook-only.`,
+            `hxa-connect: WebSocket failed for ${accountId}: ${err.message}. Falling back to webhook-only.`,
           );
         }
       }
 
+      // Return cleanup function
       return () => {
-        const conn = wsConnections.get(ctx.accountId || "default");
+        const conn = wsConnections.get(accountId);
         if (conn) {
           conn.disconnect();
-          wsConnections.delete(ctx.accountId || "default");
+          wsConnections.delete(accountId);
         }
-        log?.info?.(`hxa-connect: stopped account ${ctx.accountId || "default"}`);
+        log?.info?.(`hxa-connect: stopped account ${accountId}`);
       };
     },
   },
@@ -806,14 +814,20 @@ async function handleInboundWebhook(req: any, res: any) {
     }
   }
 
-  // Parse body
+  // Parse body with error handling
   let body: any;
-  if (typeof req.body === "object" && req.body !== null) {
-    body = req.body;
-  } else {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk);
-    body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+  try {
+    if (typeof req.body === "object" && req.body !== null) {
+      body = req.body;
+    } else {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+    }
+  } catch (err: any) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+    return;
   }
 
   // Parse webhook payload (v1 envelope or legacy flat format)
@@ -874,9 +888,27 @@ async function handleInboundWebhook(req: any, res: any) {
     return;
   }
 
+  // Thread access control for group messages
+  if (isGroup && channel_id) {
+    if (!isThreadAllowed(access, channel_id)) {
+      console.log(
+        `[hxa-connect] Thread ${channel_id} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
+      );
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+    if (!isSenderAllowed(access, channel_id, sender_name)) {
+      console.log(`[hxa-connect] Sender ${sender_name} rejected in thread ${channel_id}`);
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+  }
+
   console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
 
-  const dp = displayPrefix(matchedAccountId);
+  const dp = displayPrefix(matchedAccountId, cfg);
   const replyTarget = isGroup ? (channel_id || sender_name) : sender_name;
 
   await dispatchInbound({
