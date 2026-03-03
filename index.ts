@@ -563,6 +563,14 @@ async function connectAccount(
     log?.error?.(`${lp} Error: ${err?.message || err}`);
   });
 
+  client.on("session_invalidated", ({ code, reason }: any) => {
+    log?.error?.(`${lp} Session invalidated (code ${code}): ${reason || "unknown"}`);
+    log?.error?.(`${lp} SDK will not auto-reconnect — connection lost`);
+    threadCtx.stop();
+    client.disconnect();
+    wsConnections.delete(accountId);
+  });
+
   // Listen for abort signal to disconnect gracefully
   if (abortSignal) {
     abortSignal.addEventListener(
