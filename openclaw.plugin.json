@@ -5,13 +5,29 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "defaultHubUrl": {
+        "type": "string",
+        "description": "Default HXA-Connect hub URL (used when per-account hubUrl is not set)"
+      },
       "hubUrl": {
         "type": "string",
-        "description": "HXA-Connect server base URL (e.g. https://claw-test.coco.site/hub)"
+        "description": "HXA-Connect hub URL (single-account shorthand)"
       },
       "agentToken": {
         "type": "string",
-        "description": "HXA-Connect bot token for CocoClaw"
+        "description": "Agent token for HXA-Connect authentication"
+      },
+      "agentName": {
+        "type": "string",
+        "description": "Bot name on HXA-Connect (used for @mention detection)"
+      },
+      "orgId": {
+        "type": "string",
+        "description": "Organization ID"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent ID (for self-message filtering)"
       },
       "webhookPath": {
         "type": "string",
@@ -20,11 +36,69 @@
       "webhookSecret": {
         "type": "string",
         "description": "Secret to verify inbound webhook requests"
+      },
+      "useWebSocket": {
+        "type": "boolean",
+        "description": "Enable WebSocket real-time connection (default: true)",
+        "default": true
+      },
+      "access": {
+        "type": "object",
+        "description": "Access control settings",
+        "properties": {
+          "dmPolicy": {
+            "type": "string",
+            "enum": ["open", "allowlist"],
+            "description": "DM policy: open (anyone) or allowlist (only dmAllowFrom)"
+          },
+          "dmAllowFrom": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Allowed DM senders (when dmPolicy=allowlist)"
+          },
+          "groupPolicy": {
+            "type": "string",
+            "enum": ["open", "allowlist", "disabled"],
+            "description": "Thread access policy"
+          },
+          "threadMode": {
+            "type": "string",
+            "enum": ["mention", "smart"],
+            "description": "Thread response mode: mention (@mention only) or smart (all messages, AI decides)"
+          }
+        }
+      },
+      "accounts": {
+        "type": "object",
+        "description": "Multi-account configuration (each key is an account ID)",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "hubUrl": { "type": "string" },
+            "agentToken": { "type": "string" },
+            "agentName": { "type": "string" },
+            "orgId": { "type": "string" },
+            "agentId": { "type": "string" },
+            "webhookPath": { "type": "string" },
+            "webhookSecret": { "type": "string" },
+            "useWebSocket": { "type": "boolean" },
+            "access": {
+              "type": "object",
+              "properties": {
+                "dmPolicy": { "type": "string", "enum": ["open", "allowlist"] },
+                "dmAllowFrom": { "type": "array", "items": { "type": "string" } },
+                "groupPolicy": { "type": "string", "enum": ["open", "allowlist", "disabled"] },
+                "threadMode": { "type": "string", "enum": ["mention", "smart"] }
+              }
+            }
+          }
+        }
       }
     }
   },
   "uiHints": {
-    "agentToken": { "label": "Bot Token", "sensitive": true },
+    "agentToken": { "label": "Agent Token", "sensitive": true },
     "webhookSecret": { "label": "Webhook Secret", "sensitive": true }
   }
 }

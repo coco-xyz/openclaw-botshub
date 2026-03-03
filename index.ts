@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi, PluginRuntime, ClawdbotConfig } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, PluginRuntime } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
 // ─── Runtime singleton ───────────────────────────────────────
@@ -9,40 +9,150 @@ function getRuntime(): PluginRuntime {
 }
 
 // ─── Types ───────────────────────────────────────────────────
-interface HxaConnectChannelConfig {
+interface HxaAccessConfig {
+  dmPolicy?: "open" | "allowlist";
+  dmAllowFrom?: string[];
+  groupPolicy?: "open" | "allowlist" | "disabled";
+  threads?: Record<string, { name?: string; allowFrom?: string[]; added_at?: string }>;
+  threadMode?: "mention" | "smart";
+}
+
+interface HxaAccountConfig {
   enabled?: boolean;
   hubUrl?: string;
   agentToken?: string;
+  agentName?: string;
   orgId?: string;
+  agentId?: string;
   webhookPath?: string;
   webhookSecret?: string;
+  access?: HxaAccessConfig;
+  useWebSocket?: boolean;
+}
+
+interface HxaConnectChannelConfig {
+  enabled?: boolean;
+  /** Default hub URL for accounts that don't specify one */
+  defaultHubUrl?: string;
+  /** Single-account shorthand (used when no accounts map) */
+  hubUrl?: string;
+  agentToken?: string;
+  agentName?: string;
+  orgId?: string;
+  agentId?: string;
+  webhookPath?: string;
+  webhookSecret?: string;
+  access?: HxaAccessConfig;
+  useWebSocket?: boolean;
+  /** Multi-account map */
+  accounts?: Record<string, HxaAccountConfig>;
 }
 
 function resolveHxaConnectConfig(cfg: any): HxaConnectChannelConfig {
-  return (cfg?.channels?.['hxa-connect'] ?? {}) as HxaConnectChannelConfig;
+  return (cfg?.channels?.["hxa-connect"] ?? {}) as HxaConnectChannelConfig;
 }
 
-// ─── Outbound: send message to HXA-Connect ───────────────────────
+/** Resolve all account configs, supporting both single and multi-account. */
+function resolveAccounts(hxa: HxaConnectChannelConfig): Record<string, HxaAccountConfig> {
+  if (hxa.accounts && Object.keys(hxa.accounts).length > 0) {
+    const resolved: Record<string, HxaAccountConfig> = {};
+    for (const [id, acct] of Object.entries(hxa.accounts)) {
+      resolved[id] = {
+        ...acct,
+        hubUrl: acct.hubUrl || hxa.defaultHubUrl || hxa.hubUrl,
+      };
+    }
+    return resolved;
+  }
+  // Single-account fallback
+  return {
+    default: {
+      enabled: hxa.enabled,
+      hubUrl: hxa.hubUrl || hxa.defaultHubUrl,
+      agentToken: hxa.agentToken,
+      agentName: hxa.agentName,
+      orgId: hxa.orgId,
+      agentId: hxa.agentId,
+      webhookPath: hxa.webhookPath,
+      webhookSecret: hxa.webhookSecret,
+      access: hxa.access,
+      useWebSocket: hxa.useWebSocket,
+    },
+  };
+}
+
+function resolveAccountConfig(cfg: any, accountId?: string): HxaAccountConfig {
+  const hxa = resolveHxaConnectConfig(cfg);
+  const accounts = resolveAccounts(hxa);
+  const id = accountId || "default";
+  return accounts[id] || accounts[Object.keys(accounts)[0]] || {};
+}
+
+/** Count total configured accounts (for display prefix logic). */
+function countConfiguredAccounts(cfg: any): number {
+  const hxa = resolveHxaConnectConfig(cfg);
+  return Object.keys(resolveAccounts(hxa)).length;
+}
+
+// ─── Access Control ──────────────────────────────────────────
+
+function isDmAllowed(access: HxaAccessConfig | undefined, senderName: string): boolean {
+  const policy = access?.dmPolicy || "open";
+  if (policy === "open") return true;
+  const name = String(senderName || "").toLowerCase();
+  const allowFrom = (access?.dmAllowFrom || []).map((s) => String(s).toLowerCase());
+  return allowFrom.includes(name);
+}
+
+function isThreadAllowed(access: HxaAccessConfig | undefined, threadId: string): boolean {
+  const policy = access?.groupPolicy || "open";
+  if (policy === "disabled") return false;
+  if (policy === "open") return true;
+  return !!access?.threads?.[threadId];
+}
+
+function isSenderAllowed(
+  access: HxaAccessConfig | undefined,
+  threadId: string,
+  senderName: string,
+): boolean {
+  const tt = access?.threads?.[threadId];
+  const af = Array.isArray(tt?.allowFrom) ? tt.allowFrom : [];
+  if (af.length === 0) return true;
+  if (af.includes("*")) return true;
+  const name = String(senderName || "").toLowerCase();
+  return af.some((a) => String(a).toLowerCase() === name);
+}
+
+// ─── Outbound: send message to HXA-Connect ───────────────────
 const MAX_SEND_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
-
-// P3-3 (R2): UUIDv4-ish pattern for channel_id validation (prevents path traversal)
 const CHANNEL_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Helper: make an authenticated request to the HXA-Connect API with rate-limit retry. */
+/** Validate a path segment to prevent path traversal. */
+function assertSafePathSegment(value: string, label: string): void {
+  if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
+    throw new Error(`Invalid ${label}: ${value?.slice(0, 40)}`);
+  }
+}
+
+/** Make an authenticated request to the HXA-Connect API with rate-limit retry. */
 async function hubFetch(
-  bh: HxaConnectChannelConfig,
+  acct: HxaAccountConfig,
   path: string,
   init: RequestInit,
 ): Promise<Response> {
-  const url = `${bh.hubUrl!.replace(/\/$/, "")}${path}`;
-  // P3-1 (R2): Only set Content-Type for requests with a body
+  if (!acct.hubUrl || !acct.hubUrl.startsWith("http")) {
+    throw new Error("HXA-Connect hubUrl not configured or invalid");
+  }
+  const url = `${acct.hubUrl.replace(/\/$/, "")}${path}`;
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${bh.agentToken}`,
-    ...(init.headers as Record<string, string> ?? {}),
+    Authorization: `Bearer ${acct.agentToken}`,
+    ...((init.headers as Record<string, string>) ?? {}),
   };
-  if (bh.orgId) {
-    headers["X-Org-Id"] = bh.orgId;
+  if (acct.orgId) {
+    headers["X-Org-Id"] = acct.orgId;
   }
   if (init.body) {
     headers["Content-Type"] = "application/json";
@@ -50,13 +160,14 @@ async function hubFetch(
 
   for (let attempt = 0; attempt <= MAX_SEND_RETRIES; attempt++) {
     const resp = await fetch(url, { ...init, headers });
-
     if (resp.ok) return resp;
 
     if (resp.status === 429 && attempt < MAX_SEND_RETRIES) {
       const retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10);
       const delayMs = retryAfter > 0 ? retryAfter * 1000 : RETRY_BASE_MS * (attempt + 1);
-      console.warn(`[hxa-connect] rate limited on ${path}, retrying in ${delayMs}ms (attempt ${attempt + 1})`);
+      console.warn(
+        `[hxa-connect] rate limited on ${path}, retrying in ${delayMs}ms (attempt ${attempt + 1})`,
+      );
       await new Promise((r) => setTimeout(r, delayMs));
       continue;
     }
@@ -64,61 +175,72 @@ async function hubFetch(
     const body = await resp.text().catch(() => "");
     throw new Error(`HXA-Connect ${path} failed: ${resp.status} ${body}`);
   }
-  // Unreachable: loop always returns or throws. Kept for TypeScript return-type safety.
   throw new Error(`HXA-Connect ${path} failed: exhausted retries`);
 }
 
 /** Send a DM to an agent by name (auto-creates direct channel). */
-async function sendToHxaConnect(params: {
-  cfg: any;
-  to: string;
-  text: string;
-}): Promise<{ ok: boolean; messageId?: string }> {
-  const bh = resolveHxaConnectConfig(params.cfg);
-  if (!bh.hubUrl || !bh.agentToken) {
+async function sendDM(
+  acct: HxaAccountConfig,
+  to: string,
+  text: string,
+): Promise<{ ok: boolean; messageId?: string }> {
+  if (!acct.hubUrl || !acct.agentToken) {
     throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
-
-  const resp = await hubFetch(bh, "/api/send", {
+  const resp = await hubFetch(acct, "/api/send", {
     method: "POST",
-    body: JSON.stringify({ to: params.to, content: params.text, content_type: "text" }),
+    body: JSON.stringify({ to, content: text, content_type: "text" }),
   });
   const result = (await resp.json()) as any;
   return { ok: true, messageId: result?.message?.id };
 }
 
-/** P2-2 (R2): Validate channel_id to prevent path traversal. */
-function assertSafeChannelId(channelId: string): void {
-  if (!CHANNEL_ID_RE.test(channelId)) {
-    throw new Error(`Invalid channel_id: ${channelId.slice(0, 40)}`);
+/** Send a message to a thread. */
+async function sendToThread(
+  acct: HxaAccountConfig,
+  threadId: string,
+  text: string,
+): Promise<{ ok: boolean; messageId?: string }> {
+  if (!acct.hubUrl || !acct.agentToken) {
+    throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
+  assertSafePathSegment(threadId, "thread_id");
+  const resp = await hubFetch(acct, `/api/threads/${threadId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content: text, content_type: "text" }),
+  });
+  const result = (await resp.json()) as any;
+  return { ok: true, messageId: result?.message?.id };
 }
 
 /** Send a message to a specific channel by ID. */
-async function sendToChannel(params: {
-  cfg: any;
-  channelId: string;
-  text: string;
-}): Promise<{ ok: boolean; messageId?: string }> {
-  const bh = resolveHxaConnectConfig(params.cfg);
-  if (!bh.hubUrl || !bh.agentToken) {
+async function sendToChannel(
+  acct: HxaAccountConfig,
+  channelId: string,
+  text: string,
+): Promise<{ ok: boolean; messageId?: string }> {
+  if (!acct.hubUrl || !acct.agentToken) {
     throw new Error("HXA-Connect not configured (missing hubUrl or agentToken)");
   }
-  assertSafeChannelId(params.channelId);
-
-  const resp = await hubFetch(bh, `/api/channels/${params.channelId}/messages`, {
+  if (!CHANNEL_ID_RE.test(channelId)) {
+    throw new Error(`Invalid channel_id: ${channelId.slice(0, 40)}`);
+  }
+  const resp = await hubFetch(acct, `/api/channels/${channelId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ content: params.text, content_type: "text" }),
+    body: JSON.stringify({ content: text, content_type: "text" }),
   });
   const result = (await resp.json()) as any;
   return { ok: true, messageId: result?.message?.id };
 }
 
-/** Fetch channel metadata to determine type (direct vs group). */
-async function fetchChannelInfo(bh: HxaConnectChannelConfig, channelId: string): Promise<{ type: string; name: string | null } | null> {
-  assertSafeChannelId(channelId);
+/** Fetch channel metadata. */
+async function fetchChannelInfo(
+  acct: HxaAccountConfig,
+  channelId: string,
+): Promise<{ type: string; name: string | null } | null> {
+  if (!CHANNEL_ID_RE.test(channelId)) return null;
   try {
-    const resp = await hubFetch(bh, `/api/channels/${channelId}`, { method: "GET" });
+    const resp = await hubFetch(acct, `/api/channels/${channelId}`, { method: "GET" });
     const data = (await resp.json()) as any;
     return { type: data.type, name: data.name };
   } catch {
@@ -126,172 +248,398 @@ async function fetchChannelInfo(bh: HxaConnectChannelConfig, channelId: string):
   }
 }
 
-// ─── Channel Plugin ──────────────────────────────────────────
-const hxaConnectChannel = {
-  id: "hxa-connect" as const,
-  meta: {
-    id: "hxa-connect" as const,
-    label: "HXA-Connect",
-    selectionLabel: "HXA-Connect (Agent-to-Agent)",
-    docsPath: "/channels/hxa-connect",
-    docsLabel: "hxa-connect",
-    blurb: "Agent-to-agent messaging via HXA-Connect.",
-    aliases: ["hxa-connect", "hub"],
-    order: 90,
-  },
-  capabilities: {
-    chatTypes: ["direct" as const, "channel" as const],
-    polls: false,
-    threads: false,
-    media: false,
-    reactions: false,
-    edit: false,
-    reply: false,
-  },
-  config: {
-    listAccountIds: (_cfg: any) => ["default"],
-    resolveAccount: (cfg: any, _accountId?: string) => {
-      const bh = resolveHxaConnectConfig(cfg);
-      return {
-        accountId: "default",
-        enabled: bh.enabled !== false,
-        configured: !!(bh.hubUrl && bh.agentToken),
-        hubUrl: bh.hubUrl,
-        agentToken: bh.agentToken,
-        webhookPath: bh.webhookPath ?? "/hxa-connect/inbound",
-        webhookSecret: bh.webhookSecret,
-        config: bh,
-      };
-    },
-  },
-  outbound: {
-    deliveryMode: "direct" as const,
-    textChunkLimit: 8000,
-    // P3-2 (R2): Support both DM (agent name) and channel (channel_id) targets.
-    // If `to` matches channel ID format, send to channel; otherwise DM by name.
-    sendText: async (params: {
-      cfg: any;
-      to: string;
-      text: string;
-      accountId?: string;
-    }) => {
-      const isChannelId = CHANNEL_ID_RE.test(params.to) && params.to.length > 20;
-      const result = isChannelId
-        ? await sendToChannel({ cfg: params.cfg, channelId: params.to, text: params.text })
-        : await sendToHxaConnect({ cfg: params.cfg, to: params.to, text: params.text });
-      return { channel: "hxa-connect" as const, ...result };
-    },
-  },
-  gateway: {
-    startAccount: async (ctx: any) => {
-      const bh = resolveHxaConnectConfig(ctx.cfg);
-      ctx.log?.info?.(`hxa-connect: starting channel`);
-      ctx.setStatus?.({ accountId: "default" });
+// ─── WebSocket Connection Manager ────────────────────────────
 
-      // No persistent connection needed — we receive inbound via HTTP route
-      // The HTTP route is registered in the plugin register() function
-      return () => {
-        ctx.log?.info?.("hxa-connect: stopped");
-      };
-    },
-  },
-};
+interface WsConnection {
+  client: any; // HxaConnectClient
+  threadCtx: any; // ThreadContext
+  accountId: string;
+  config: HxaAccountConfig;
+  disconnect: () => void;
+}
 
-// ─── Inbound webhook handler ─────────────────────────────────
-async function handleInboundWebhook(req: any, res: any) {
-  const core = getRuntime();
-  const cfg = await core.config.loadConfig();
-  const bh = resolveHxaConnectConfig(cfg);
+const wsConnections = new Map<string, WsConnection>();
 
-  // Verify webhook secret if configured
-  if (bh.webhookSecret) {
-    const authHeader = req.headers?.authorization ?? "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (token !== bh.webhookSecret) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Unauthorized" }));
-      return;
-    }
-  }
+/** Format display prefix for log/message context. */
+function displayPrefix(accountId: string, cfg: any): string {
+  const totalAccounts = countConfiguredAccounts(cfg);
+  if (totalAccounts <= 1 && accountId === "default") return "HXA-Connect";
+  return `HXA:${accountId}`;
+}
 
-  // Parse body
-  let body: any;
-  if (typeof req.body === "object" && req.body !== null) {
-    body = req.body;
-  } else {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk);
-    body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-  }
-
-  // P2-1: Only match v1 on explicit webhook_version field (not presence of body.message)
-  let channel_id: string | undefined;
-  let sender_name: string | undefined;
-  let sender_id: string | undefined;
-  let content: string | undefined;
-  let message_id: string | undefined;
-  let chat_type: string | undefined;
-  let group_name: string | undefined;
-
-  if (body.webhook_version === '1') {
-    // v1 envelope: { webhook_version, type, channel_id, message: WireMessage, sender_name }
-    const msg = body.message;
-    channel_id  = body.channel_id;
-    sender_name = body.sender_name;
-    sender_id   = msg?.sender_id;
-    content     = msg?.content;
-    message_id  = msg?.id;
-
-    // v1 payload lacks channel type — resolve via API
-    if (channel_id) {
-      const channelInfo = await fetchChannelInfo(bh, channel_id);
-      if (channelInfo) {
-        chat_type  = channelInfo.type;
-        group_name = channelInfo.name ?? undefined;
-      } else {
-        // P2-1 (R2): API lookup failed — default to channel-based reply to avoid
-        // silently misrouting group messages as DMs
-        console.warn(`[hxa-connect] fetchChannelInfo failed for ${channel_id}, defaulting to channel-based reply`);
-        chat_type  = "group";
-        group_name = undefined;
-      }
-    }
-  } else {
-    // Legacy flat format (pre-GA servers)
-    channel_id  = body.channel_id;
-    sender_name = body.sender_name;
-    sender_id   = body.sender_id;
-    content     = body.content;
-    message_id  = body.message_id;
-    chat_type   = body.chat_type;
-    group_name  = body.group_name;
-  }
-
-  if (!content || !sender_name) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Missing content or sender_name" }));
+async function connectAccount(
+  accountId: string,
+  acct: HxaAccountConfig,
+  cfg: any,
+  log: any,
+  abortSignal?: AbortSignal,
+) {
+  // Guard against duplicate connections
+  if (wsConnections.has(accountId)) {
+    log?.warn?.(`[hxa-connect:${accountId}] Already connected, skipping`);
     return;
   }
 
-  console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
+  // Dynamic import SDK
+  let HxaConnectClient: any;
+  let ThreadContext: any;
+  try {
+    const sdk = await import("@coco-xyz/hxa-connect-sdk");
+    HxaConnectClient = sdk.HxaConnectClient;
+    ThreadContext = sdk.ThreadContext;
+  } catch (err: any) {
+    log?.error?.(`[hxa-connect:${accountId}] Failed to load hxa-connect-sdk: ${err.message}`);
+    return;
+  }
 
-  // Build inbound context
-  const from = `hxa-connect:${sender_id || sender_name}`;
-  const to = "hxa-connect:cococlaw";
-  const isGroup = chat_type === "group";
+  const dp = displayPrefix(accountId, cfg);
+  const lp = `[hxa-connect:${accountId}]`;
+
+  const client = new HxaConnectClient({
+    url: acct.hubUrl,
+    token: acct.agentToken,
+    orgId: acct.orgId,
+    reconnect: {
+      enabled: true,
+      initialDelay: 3000,
+      maxDelay: 60000,
+      backoffFactor: 1.5,
+    },
+  });
+
+  const isSelf = (id: string, metadata?: any) => {
+    if (!acct.agentId || id !== acct.agentId) return false;
+    // Human-authored messages via Web UI use the bot's token but should not
+    // be treated as self-echo — let them through.
+    const meta =
+      typeof metadata === "string"
+        ? (() => { try { return JSON.parse(metadata); } catch { return null; } })()
+        : metadata;
+    if (meta?.provenance?.authored_by === "human") return false;
+    return true;
+  };
+  const access = acct.access || {};
+
+  // ─── DM Handler ──────────────────────────────────────────
+  client.on("message", (msg: any) => {
+    const sender = msg.sender_name || "unknown";
+    const content = msg.message?.content || msg.content || "";
+    if (isSelf(msg.message?.sender_id, msg.message?.metadata)) return;
+
+    if (!isDmAllowed(access, sender)) {
+      log?.info?.(`${lp} DM from ${sender} rejected (dmPolicy: ${access.dmPolicy || "open"})`);
+      return;
+    }
+
+    log?.info?.(`${lp} DM from ${sender}: ${content.substring(0, 80)}`);
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: sender,
+      senderId: msg.message?.sender_id || sender,
+      content,
+      messageId: msg.message?.id,
+      chatType: "direct",
+      replyTarget: sender,
+      displayPrefix: dp,
+    });
+  });
+
+  // ─── Thread Handlers ─────────────────────────────────────
+  const threadMode = access.threadMode || "mention";
+  const agentName = acct.agentName || "cococlaw";
+  const threadCtx = new ThreadContext(client, {
+    botNames: [agentName],
+    botId: acct.agentId || undefined,
+    ...(threadMode === "smart" ? { triggerPatterns: [/^/] } : {}),
+  });
+
+  const mentionRe = new RegExp(
+    `@${agentName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+    "i",
+  );
+
+  function extractText(msg: any): string {
+    const parts = [msg.content || ""];
+    if (msg.parts) {
+      for (const part of msg.parts) {
+        if ("content" in part && typeof part.content === "string") {
+          parts.push(part.content);
+        }
+      }
+    }
+    return parts.join(" ");
+  }
+
+  /** Display-friendly sender name (human provenance aware). */
+  function msgSender(msg: any): string {
+    const botName = msg.sender_name || msg.sender_id || "unknown";
+    const meta =
+      typeof msg.metadata === "string"
+        ? (() => { try { return JSON.parse(msg.metadata); } catch { return null; } })()
+        : msg.metadata;
+    if (meta?.provenance?.authored_by === "human" && meta.provenance.owner_name) {
+      return `${meta.provenance.owner_name} (via ${botName})`;
+    }
+    return botName;
+  }
+
+  threadCtx.onMention(({ threadId, message, snapshot }: any) => {
+    const sender = msgSender(message);
+    const content = message.content || "";
+
+    if (!isThreadAllowed(access, threadId)) {
+      log?.info?.(
+        `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
+      );
+      return;
+    }
+    if (!isSenderAllowed(access, threadId, sender)) {
+      log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
+      return;
+    }
+
+    const isRealMention = mentionRe.test(extractText(message));
+
+    // Build message with XML tags (consistent with Lark/TG format)
+    const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+
+    // Thread context: previous messages (excluding trigger)
+    const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
+    if (contextMsgs.length > 0) {
+      const lines = contextMsgs.map((m: any) => `[${msgSender(m)}]: ${m.content || ""}`);
+      parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
+    }
+
+    // Smart mode hint
+    if (!isRealMention && threadMode === "smart") {
+      parts.push(
+        "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
+      );
+    }
+
+    // Current message
+    parts.push(`<current-message>\n${content}\n</current-message>`);
+
+    const formattedContent = parts.join("");
+    log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: sender,
+      senderId: message.sender_id || sender,
+      content: formattedContent,
+      messageId: message.id,
+      chatType: "group",
+      groupSubject: `thread:${threadId}`,
+      replyTarget: `thread:${threadId}`,
+      displayPrefix: dp,
+    });
+  });
+
+  // Buffer thread messages (ThreadContext handles delivery via onMention)
+  client.on("thread_message", (msg: any) => {
+    const message = msg.message || {};
+    if (isSelf(message.sender_id, message.metadata)) return;
+    const sender = message.sender_name || message.sender_id || "unknown";
+    const content = message.content || "";
+    log?.debug?.(
+      `${lp} Thread ${msg.thread_id} from ${sender} (buffered): ${content.substring(0, 80)}`,
+    );
+  });
+
+  // Thread lifecycle events
+  client.on("thread_created", (msg: any) => {
+    const thread = msg.thread || {};
+    const topic = thread.topic || "untitled";
+    const tags = thread.tags?.length ? thread.tags.join(", ") : "none";
+    log?.info?.(`${lp} Thread created: "${topic}" (tags: ${tags})`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp} Thread] New thread created: "${topic}" (tags: ${tags}, id: ${thread.id})`,
+      chatType: "group",
+      groupSubject: `thread:${thread.id}`,
+      replyTarget: `thread:${thread.id}`,
+      displayPrefix: dp,
+    });
+  });
+
+  client.on("thread_updated", (msg: any) => {
+    const thread = msg.thread || {};
+    const changes = msg.changes || [];
+    log?.info?.(`${lp} Thread updated: "${thread.topic}" changes: ${changes.join(", ")}`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp} Thread:${thread.id}] Thread "${thread.topic}" updated: ${changes.join(", ")} (status: ${thread.status})`,
+      chatType: "group",
+      groupSubject: `thread:${thread.id}`,
+      replyTarget: `thread:${thread.id}`,
+      displayPrefix: dp,
+    });
+  });
+
+  client.on("thread_status_changed", (msg: any) => {
+    const by = msg.by ? ` (by ${msg.by})` : "";
+    log?.info?.(`${lp} Thread status: "${msg.topic}" ${msg.from} -> ${msg.to}${by}`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp} Thread:${msg.thread_id}] Thread "${msg.topic}" status changed: ${msg.from} -> ${msg.to}${by}`,
+      chatType: "group",
+      groupSubject: `thread:${msg.thread_id}`,
+      replyTarget: `thread:${msg.thread_id}`,
+      displayPrefix: dp,
+    });
+  });
+
+  client.on("thread_artifact", (msg: any) => {
+    const artifact = msg.artifact || {};
+    const action = msg.action || "added";
+    log?.info?.(`${lp} Thread ${msg.thread_id} artifact ${action}: ${artifact.artifact_key}`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp} Thread:${msg.thread_id}] Artifact ${action}: "${artifact.title || artifact.artifact_key}" (type: ${artifact.type})`,
+      chatType: "group",
+      groupSubject: `thread:${msg.thread_id}`,
+      replyTarget: `thread:${msg.thread_id}`,
+      displayPrefix: dp,
+    });
+  });
+
+  client.on("thread_participant", (msg: any) => {
+    const botName = msg.bot_name || msg.bot_id;
+    const by = msg.by ? ` (by ${msg.by})` : "";
+    const labelTag = msg.label ? ` [${msg.label}]` : "";
+    log?.info?.(`${lp} Thread ${msg.thread_id}: ${botName} ${msg.action}${by}`);
+
+    dispatchInbound({
+      cfg,
+      accountId,
+      senderName: "system",
+      senderId: "system",
+      content: `[${dp} Thread:${msg.thread_id}] ${botName}${labelTag} ${msg.action} the thread${by}`,
+      chatType: "group",
+      groupSubject: `thread:${msg.thread_id}`,
+      replyTarget: `thread:${msg.thread_id}`,
+      displayPrefix: dp,
+    });
+  });
+
+  // Bot presence
+  client.on("bot_online", (msg: any) => {
+    log?.info?.(`${lp} ${msg.bot?.name || "unknown"} is online`);
+  });
+  client.on("bot_offline", (msg: any) => {
+    log?.info?.(`${lp} ${msg.bot?.name || "unknown"} is offline`);
+  });
+
+  // Connection lifecycle
+  client.on("reconnecting", ({ attempt, delay }: any) => {
+    log?.warn?.(`${lp} Reconnecting (attempt ${attempt}, delay ${delay}ms)...`);
+  });
+  client.on("reconnected", ({ attempts }: any) => {
+    log?.info?.(`${lp} Reconnected after ${attempts} attempt(s)`);
+  });
+  client.on("reconnect_failed", ({ attempts }: any) => {
+    log?.error?.(`${lp} Reconnect failed after ${attempts} attempts`);
+  });
+  client.on("error", (err: any) => {
+    log?.error?.(`${lp} Error: ${err?.message || err}`);
+  });
+
+  // Listen for abort signal to disconnect gracefully
+  if (abortSignal) {
+    abortSignal.addEventListener(
+      "abort",
+      () => {
+        log?.info?.(`${lp} Abort signal received, disconnecting`);
+        threadCtx.stop();
+        client.disconnect();
+        wsConnections.delete(accountId);
+      },
+      { once: true },
+    );
+  }
+
+  // Connect
+  log?.info?.(`${lp} Connecting as "${agentName}" to ${acct.hubUrl}`);
+  await client.connect();
+  log?.info?.(`${lp} WebSocket connected`);
+  await threadCtx.start();
+  log?.info?.(`${lp} ThreadContext started (mode: ${threadMode}, filter: @${agentName})`);
+
+  wsConnections.set(accountId, {
+    client,
+    threadCtx,
+    accountId,
+    config: acct,
+    disconnect: () => {
+      threadCtx.stop();
+      client.disconnect();
+    },
+  });
+}
+
+// ─── Inbound Dispatch (shared by WS + Webhook) ──────────────
+
+interface InboundParams {
+  cfg: any;
+  accountId: string;
+  senderName: string;
+  senderId: string;
+  content: string;
+  messageId?: string;
+  chatType: "direct" | "group";
+  groupSubject?: string;
+  replyTarget: string; // bot name for DM, "thread:<id>" for threads
+  displayPrefix: string;
+}
+
+async function dispatchInbound(params: InboundParams) {
+  const core = getRuntime();
+  const {
+    cfg,
+    accountId,
+    senderName,
+    senderId,
+    content,
+    messageId,
+    chatType,
+    groupSubject,
+    replyTarget,
+  } = params;
+
+  const from = `hxa-connect:${senderId}`;
+  const to = `hxa-connect:${accountId}`;
 
   const route = core.channel.routing.resolveAgentRoute({
     channel: "hxa-connect",
     from,
-    chatType: isGroup ? "group" : "direct",
-    groupSubject: isGroup ? (group_name || channel_id) : undefined,
+    chatType,
+    groupSubject: chatType === "group" ? (groupSubject || replyTarget) : undefined,
     cfg,
   });
 
   const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
   const formattedBody = core.channel.reply.formatAgentEnvelope({
     channel: "HXA-Connect",
-    from: sender_name,
+    from: senderName,
     timestamp: new Date(),
     envelope: envelopeOptions,
     body: content,
@@ -305,26 +653,25 @@ async function handleInboundWebhook(req: any, res: any) {
     From: from,
     To: to,
     SessionKey: route.sessionKey,
-    AccountId: "default",
-    ChatType: isGroup ? "group" : "direct",
-    GroupSubject: isGroup ? (group_name || channel_id) : undefined,
-    SenderName: sender_name,
-    SenderId: sender_id || sender_name,
+    AccountId: accountId,
+    ChatType: chatType,
+    GroupSubject: chatType === "group" ? (groupSubject || replyTarget) : undefined,
+    SenderName: senderName,
+    SenderId: senderId,
     Provider: "hxa-connect" as const,
     Surface: "hxa-connect" as const,
-    MessageSid: message_id || `hxa-connect-${Date.now()}`,
+    MessageSid: messageId || `hxa-connect-${Date.now()}`,
     Timestamp: Date.now(),
     WasMentioned: true,
     CommandAuthorized: true,
     OriginatingChannel: "hxa-connect" as const,
     OriginatingTo: to,
-    ConversationLabel: isGroup ? (group_name || channel_id || sender_name) : sender_name,
+    ConversationLabel: chatType === "group" ? (groupSubject || senderName) : senderName,
   });
 
-  // P2-3: For group channels, reply to the channel via channel_id;
-  // for DMs, reply to the sender by name (which auto-creates a direct channel).
-  const replyChannelId = isGroup ? channel_id : undefined;
-  const replySenderName = sender_name;
+  const acct = resolveAccountConfig(cfg, accountId);
+  const isThread = replyTarget.startsWith("thread:");
+  const threadId = isThread ? replyTarget.slice("thread:".length) : undefined;
 
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
@@ -338,10 +685,10 @@ async function handleInboundWebhook(req: any, res: any) {
         if (!text?.trim()) return;
 
         try {
-          if (replyChannelId) {
-            await sendToChannel({ cfg, channelId: replyChannelId, text });
+          if (threadId) {
+            await sendToThread(acct, threadId, text);
           } else {
-            await sendToHxaConnect({ cfg, to: replySenderName, text });
+            await sendDM(acct, replyTarget, text);
           }
         } catch (err: any) {
           console.error(`[hxa-connect] reply failed:`, err);
@@ -353,6 +700,259 @@ async function handleInboundWebhook(req: any, res: any) {
     },
     replyOptions: {},
   });
+}
+
+// ─── Channel Plugin ──────────────────────────────────────────
+
+const hxaConnectChannel = {
+  id: "hxa-connect" as const,
+  meta: {
+    id: "hxa-connect" as const,
+    label: "HXA-Connect",
+    selectionLabel: "HXA-Connect (Agent-to-Agent)",
+    docsPath: "/channels/hxa-connect",
+    docsLabel: "hxa-connect",
+    blurb: "Agent-to-agent messaging via HXA-Connect with WebSocket + webhook support.",
+    aliases: ["hxa-connect", "hub"],
+    order: 90,
+  },
+  capabilities: {
+    chatTypes: ["direct" as const, "channel" as const],
+    polls: false,
+    threads: true,
+    media: false,
+    reactions: false,
+    edit: false,
+    reply: false,
+  },
+  config: {
+    listAccountIds: (cfg: any) => {
+      const hxa = resolveHxaConnectConfig(cfg);
+      return Object.keys(resolveAccounts(hxa));
+    },
+    resolveAccount: (cfg: any, accountId?: string) => {
+      const acct = resolveAccountConfig(cfg, accountId);
+      return {
+        accountId: accountId || "default",
+        enabled: acct.enabled !== false,
+        configured: !!(acct.hubUrl && acct.agentToken),
+        hubUrl: acct.hubUrl,
+        agentToken: acct.agentToken,
+        webhookPath: acct.webhookPath ?? "/hxa-connect/inbound",
+        webhookSecret: acct.webhookSecret,
+        config: acct,
+      };
+    },
+  },
+  outbound: {
+    deliveryMode: "direct" as const,
+    textChunkLimit: 8000,
+    sendText: async (params: {
+      cfg: any;
+      to: string;
+      text: string;
+      accountId?: string;
+    }) => {
+      const acct = resolveAccountConfig(params.cfg, params.accountId);
+      const target = params.to;
+
+      let result;
+      if (target.startsWith("thread:")) {
+        result = await sendToThread(acct, target.slice("thread:".length), params.text);
+      } else if (UUID_RE.test(target)) {
+        // Might be a thread ID — try thread first, fall back to DM
+        try {
+          const resp = await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
+          if (resp.ok) {
+            result = await sendToThread(acct, target, params.text);
+          } else {
+            result = await sendDM(acct, target, params.text);
+          }
+        } catch {
+          result = await sendDM(acct, target, params.text);
+        }
+      } else if (CHANNEL_ID_RE.test(target) && target.length > 20) {
+        result = await sendToChannel(acct, target, params.text);
+      } else {
+        result = await sendDM(acct, target, params.text);
+      }
+
+      return { channel: "hxa-connect" as const, ...result };
+    },
+  },
+  gateway: {
+    startAccount: async (ctx: any) => {
+      const acct = resolveAccountConfig(ctx.cfg, ctx.accountId);
+      const log = ctx.log;
+      const accountId = ctx.accountId || "default";
+      log?.info?.(`hxa-connect: starting account ${accountId}`);
+      ctx.setStatus?.({ accountId });
+
+      // Start WebSocket connection for this account
+      if (acct.useWebSocket !== false && acct.hubUrl && acct.agentToken) {
+        try {
+          await connectAccount(accountId, acct, ctx.cfg, log, ctx.abortSignal);
+        } catch (err: any) {
+          log?.warn?.(
+            `hxa-connect: WebSocket failed for ${accountId}: ${err.message}. Falling back to webhook-only.`,
+          );
+        }
+      }
+
+      // Return cleanup function
+      return () => {
+        const conn = wsConnections.get(accountId);
+        if (conn) {
+          conn.disconnect();
+          wsConnections.delete(accountId);
+        }
+        log?.info?.(`hxa-connect: stopped account ${accountId}`);
+      };
+    },
+  },
+};
+
+// ─── Inbound webhook handler (fallback / non-WS mode) ────────
+async function handleInboundWebhook(req: any, res: any) {
+  const core = getRuntime();
+  const cfg = await core.config.loadConfig();
+
+  // Determine which account this webhook is for
+  const requestPath = req.url || req.path || "";
+  const hxa = resolveHxaConnectConfig(cfg);
+  const accounts = resolveAccounts(hxa);
+
+  let matchedAccountId = "default";
+  for (const [id, acct] of Object.entries(accounts)) {
+    const webhookPath = acct.webhookPath ?? "/hxa-connect/inbound";
+    if (requestPath.includes(webhookPath.replace(/^\//, ""))) {
+      matchedAccountId = id;
+      break;
+    }
+  }
+
+  const acct = accounts[matchedAccountId] || accounts[Object.keys(accounts)[0]];
+
+  // Verify webhook secret if configured
+  if (acct?.webhookSecret) {
+    const authHeader = req.headers?.authorization ?? "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    if (token !== acct.webhookSecret) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+  }
+
+  // Parse body with error handling
+  let body: any;
+  try {
+    if (typeof req.body === "object" && req.body !== null) {
+      body = req.body;
+    } else {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+    }
+  } catch (err: any) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+    return;
+  }
+
+  // Parse webhook payload (v1 envelope or legacy flat format)
+  let channel_id: string | undefined;
+  let sender_name: string | undefined;
+  let sender_id: string | undefined;
+  let content: string | undefined;
+  let message_id: string | undefined;
+  let chat_type: string | undefined;
+  let group_name: string | undefined;
+
+  if (body.webhook_version === "1") {
+    const msg = body.message;
+    channel_id = body.channel_id;
+    sender_name = body.sender_name;
+    sender_id = msg?.sender_id;
+    content = msg?.content;
+    message_id = msg?.id;
+
+    if (channel_id && acct) {
+      const channelInfo = await fetchChannelInfo(acct, channel_id);
+      if (channelInfo) {
+        chat_type = channelInfo.type;
+        group_name = channelInfo.name ?? undefined;
+      } else {
+        console.warn(
+          `[hxa-connect] fetchChannelInfo failed for ${channel_id}, defaulting to channel-based reply`,
+        );
+        chat_type = "group";
+      }
+    }
+  } else {
+    channel_id = body.channel_id;
+    sender_name = body.sender_name;
+    sender_id = body.sender_id;
+    content = body.content;
+    message_id = body.message_id;
+    chat_type = body.chat_type;
+    group_name = body.group_name;
+  }
+
+  if (!content || !sender_name) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Missing content or sender_name" }));
+    return;
+  }
+
+  // Access control
+  const access = acct?.access || {};
+  const isGroup = chat_type === "group";
+
+  if (!isGroup && !isDmAllowed(access, sender_name)) {
+    console.log(
+      `[hxa-connect] DM from ${sender_name} rejected (dmPolicy: ${access.dmPolicy || "open"})`,
+    );
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Forbidden" }));
+    return;
+  }
+
+  // Thread access control for group messages
+  if (isGroup && channel_id) {
+    if (!isThreadAllowed(access, channel_id)) {
+      console.log(
+        `[hxa-connect] Thread ${channel_id} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
+      );
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+    if (!isSenderAllowed(access, channel_id, sender_name)) {
+      console.log(`[hxa-connect] Sender ${sender_name} rejected in thread ${channel_id}`);
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+  }
+
+  console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
+
+  const dp = displayPrefix(matchedAccountId, cfg);
+  const replyTarget = isGroup ? (channel_id || sender_name) : sender_name;
+
+  await dispatchInbound({
+    cfg,
+    accountId: matchedAccountId,
+    senderName: sender_name,
+    senderId: sender_id || sender_name,
+    content,
+    messageId: message_id,
+    chatType: isGroup ? "group" : "direct",
+    groupSubject: isGroup ? (group_name || channel_id) : undefined,
+    replyTarget,
+    displayPrefix: dp,
+  });
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ ok: true }));
@@ -362,7 +962,7 @@ async function handleInboundWebhook(req: any, res: any) {
 const plugin = {
   id: "hxa-connect",
   name: "HXA-Connect",
-  description: "Agent-to-agent messaging via HXA-Connect",
+  description: "Agent-to-agent messaging via HXA-Connect (WebSocket + webhook)",
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     pluginRuntime = api.runtime;
@@ -370,15 +970,26 @@ const plugin = {
     // Register the channel
     api.registerChannel({ plugin: hxaConnectChannel });
 
-    // Register HTTP route for inbound webhooks
-    const bh = resolveHxaConnectConfig(api.config);
-    const webhookPath = bh.webhookPath ?? "/hxa-connect/inbound";
-    api.registerHttpRoute({
-      path: webhookPath,
-      handler: handleInboundWebhook,
-    });
+    // Register HTTP routes for inbound webhooks (per-account)
+    const hxa = resolveHxaConnectConfig(api.config);
+    const accounts = resolveAccounts(hxa);
+    const registeredPaths = new Set<string>();
 
-    api.logger.info(`hxa-connect: plugin loaded (webhook: ${webhookPath})`);
+    for (const [id, acct] of Object.entries(accounts)) {
+      const webhookPath = acct.webhookPath ?? "/hxa-connect/inbound";
+      if (!registeredPaths.has(webhookPath)) {
+        api.registerHttpRoute({
+          path: webhookPath,
+          handler: handleInboundWebhook,
+        });
+        registeredPaths.add(webhookPath);
+        api.logger.info(`hxa-connect: registered webhook route: ${webhookPath} (account: ${id})`);
+      }
+    }
+
+    api.logger.info(
+      `hxa-connect: plugin loaded (${Object.keys(accounts).length} account(s), WebSocket + webhook)`,
+    );
   },
 };
 
