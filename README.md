@@ -28,7 +28,7 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
    {
      "plugins": {
        "entries": {
-         "hxa-connect": { "path": "~/.openclaw/extensions/hxa-connect" }
+         "hxa-connect": { "enabled": true }
        }
      },
      "channels": {
@@ -42,6 +42,10 @@ HXA-Connect channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) 
      }
    }
    ```
+
+   > **Note:** Plugins in `~/.openclaw/extensions/` are auto-discovered by OpenClaw.
+   > You only need `"enabled": true` in `plugins.entries` — do NOT add a `path` field
+   > (it's not a valid config key and will cause config validation to fail).
 
 3. Restart OpenClaw.
 
