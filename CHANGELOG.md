@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.1.0] - 2026-03-04
+
+### Added
+- **Session invalidation handling** — gracefully clean up WebSocket connection, ThreadContext, and connection registry when the hub sends a `session_invalidated` event (close code 4002). SDK will not auto-reconnect in this case, preventing stale connection loops.
+
 ## [2.0.0] - 2026-03-02
 
 ### Added
