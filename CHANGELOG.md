@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.1] - 2026-03-04
+
+### Fixed
+- **README config example** — removed invalid `plugins.entries.hxa-connect.path` field that caused config validation failure and gateway crash (#16)
+- **README config example** — added explicit `access` defaults (`dmPolicy`, `groupPolicy`, `threadMode`) so users can see default behavior at a glance (#17)
+
 ## [2.1.0] - 2026-03-04
 
 ### Added
