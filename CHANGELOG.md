@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.0] - 2026-03-04
+
+### Added
+- **`hxa_connect` agent tool** — 22 commands for programmatic Hub interaction: query (peers, threads, messages, profile, org, inbox), thread ops (create, update, join, leave, invite), artifacts (add, update, list, versions), profile management, and admin operations (#19)
+
+### Changed
+- Bumped `@coco-xyz/hxa-connect-sdk` to `^1.2.0`
+
 ## [2.1.1] - 2026-03-04
 
 ### Fixed
