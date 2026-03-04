@@ -966,6 +966,458 @@ async function handleInboundWebhook(req: any, res: any) {
   res.end(JSON.stringify({ ok: true }));
 }
 
+// ─── Agent Tool Registration ─────────────────────────────────
+
+function registerTools(api: OpenClawPluginApi) {
+  /** Create a short-lived SDK client for REST API calls. */
+  async function createClient(acct: HxaAccountConfig): Promise<any> {
+    const sdk = await import("@coco-xyz/hxa-connect-sdk");
+    return new sdk.HxaConnectClient({
+      url: acct.hubUrl,
+      token: acct.agentToken,
+      orgId: acct.orgId,
+    });
+  }
+
+  api.registerTool({
+    name: "hxa_connect",
+    description: `Interact with HXA-Connect Hub (agent-to-agent collaboration platform).
+
+Commands:
+  Query: peers, threads, thread, messages, profile, org, inbox
+  Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
+  Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
+  Profile: profile-update, rename
+  Admin: role, ticket-create, rotate-secret`,
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          enum: [
+            "peers",
+            "threads",
+            "thread",
+            "messages",
+            "profile",
+            "org",
+            "inbox",
+            "thread-create",
+            "thread-update",
+            "thread-join",
+            "thread-leave",
+            "thread-invite",
+            "artifact-add",
+            "artifact-update",
+            "artifact-list",
+            "artifact-versions",
+            "profile-update",
+            "rename",
+            "role",
+            "ticket-create",
+            "rotate-secret",
+          ],
+          description: "The HXA-Connect command to execute",
+        },
+        account: {
+          type: "string",
+          description: "Account ID for multi-account setups (uses default if omitted)",
+        },
+        // Query params
+        thread_id: {
+          type: "string",
+          description: "Thread ID (for thread, messages, thread-update, thread-join, thread-leave, thread-invite, artifact-*)",
+        },
+        status: {
+          type: "string",
+          description: "Thread status filter (for threads: active|blocked|reviewing|resolved|closed) or new status (for thread-update)",
+        },
+        limit: {
+          type: "number",
+          description: "Max results to return (for messages)",
+        },
+        since: {
+          type: "number",
+          description: "Timestamp in ms — return items after this time (for messages, inbox)",
+        },
+        before: {
+          type: "number",
+          description: "Timestamp in ms — return items before this time (for messages)",
+        },
+        // Thread create/update params
+        topic: {
+          type: "string",
+          description: "Thread topic (for thread-create, thread-update)",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Thread tags (for thread-create)",
+        },
+        participants: {
+          type: "array",
+          items: { type: "string" },
+          description: "Bot names to invite (for thread-create)",
+        },
+        context: {
+          type: "string",
+          description: "Thread context text (for thread-create, thread-update)",
+        },
+        close_reason: {
+          type: "string",
+          enum: ["manual", "timeout", "error"],
+          description: "Reason for closing (for thread-update with status=closed)",
+        },
+        // Thread invite params
+        bot_id: {
+          type: "string",
+          description: "Bot name or ID (for thread-invite, role)",
+        },
+        label: {
+          type: "string",
+          description: "Role label for participant (for thread-invite)",
+        },
+        // Artifact params
+        artifact_key: {
+          type: "string",
+          description: "Artifact key identifier (for artifact-add, artifact-update, artifact-versions)",
+        },
+        artifact_type: {
+          type: "string",
+          enum: ["markdown", "code", "text", "link"],
+          description: "Artifact type (for artifact-add)",
+        },
+        title: {
+          type: "string",
+          description: "Artifact title (for artifact-add, artifact-update)",
+        },
+        body: {
+          type: "string",
+          description: "Artifact content body (for artifact-add, artifact-update)",
+        },
+        url: {
+          type: "string",
+          description: "URL for link artifacts (for artifact-add)",
+        },
+        language: {
+          type: "string",
+          description: "Programming language for code artifacts (for artifact-add)",
+        },
+        // Profile params
+        bio: {
+          type: "string",
+          description: "Bot bio (for profile-update)",
+        },
+        role_text: {
+          type: "string",
+          description: "Bot role description (for profile-update)",
+        },
+        team: {
+          type: "string",
+          description: "Team name (for profile-update)",
+        },
+        status_text: {
+          type: "string",
+          description: "Status text (for profile-update)",
+        },
+        timezone: {
+          type: "string",
+          description: "Timezone (for profile-update)",
+        },
+        new_name: {
+          type: "string",
+          description: "New bot name (for rename)",
+        },
+        // Admin params
+        bot_role: {
+          type: "string",
+          enum: ["admin", "member"],
+          description: "Role to assign (for role command)",
+        },
+        reusable: {
+          type: "boolean",
+          description: "Whether invite ticket is reusable (for ticket-create)",
+        },
+        expires_in: {
+          type: "number",
+          description: "Ticket expiry in seconds (for ticket-create)",
+        },
+      },
+      required: ["command"],
+    },
+    async execute(_id: string, params: Record<string, any>) {
+      try {
+        const cfg = await getRuntime().config.loadConfig();
+        const acct = resolveAccountConfig(cfg, params.account);
+
+        if (!acct.hubUrl || !acct.agentToken) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "HXA-Connect not configured (missing hubUrl or agentToken)",
+                }),
+              },
+            ],
+          };
+        }
+
+        const client = await createClient(acct);
+        let result: any;
+
+        switch (params.command) {
+          // ─── Query ──────────────────────────────────────────
+          case "peers": {
+            result = await client.listPeers();
+            break;
+          }
+
+          case "threads": {
+            const opts = params.status ? { status: params.status } : undefined;
+            result = await client.listThreads(opts);
+            break;
+          }
+
+          case "thread": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required");
+            }
+            result = await client.getThread(params.thread_id);
+            break;
+          }
+
+          case "messages": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required");
+            }
+            const opts: any = {};
+            if (params.limit != null) opts.limit = params.limit;
+            if (params.since != null) opts.since = params.since;
+            if (params.before != null) opts.before = params.before;
+            result = await client.getThreadMessages(params.thread_id, opts);
+            break;
+          }
+
+          case "profile": {
+            result = await client.getProfile();
+            break;
+          }
+
+          case "org": {
+            result = await client.getOrgInfo();
+            break;
+          }
+
+          case "inbox": {
+            if (params.since == null) {
+              return errResult("since (timestamp in ms) is required for inbox");
+            }
+            result = await client.inbox(params.since);
+            break;
+          }
+
+          // ─── Thread Operations ──────────────────────────────
+          case "thread-create": {
+            if (!params.topic) {
+              return errResult("topic is required for thread-create");
+            }
+            const opts: any = { topic: params.topic };
+            if (params.tags) opts.tags = params.tags;
+            if (params.participants) opts.participants = params.participants;
+            if (params.context) opts.context = params.context;
+            result = await client.createThread(opts);
+            break;
+          }
+
+          case "thread-update": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required for thread-update");
+            }
+            const updates: any = {};
+            if (params.status) updates.status = params.status;
+            if (params.topic) updates.topic = params.topic;
+            if (params.close_reason) updates.close_reason = params.close_reason;
+            if (params.context) updates.context = params.context;
+            if (Object.keys(updates).length === 0) {
+              return errResult(
+                "At least one update field is required (status, topic, close_reason, context)",
+              );
+            }
+            result = await client.updateThread(params.thread_id, updates);
+            break;
+          }
+
+          case "thread-join": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required for thread-join");
+            }
+            result = await client.joinThread(params.thread_id);
+            break;
+          }
+
+          case "thread-leave": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required for thread-leave");
+            }
+            await client.leave(params.thread_id);
+            result = { ok: true };
+            break;
+          }
+
+          case "thread-invite": {
+            if (!params.thread_id || !params.bot_id) {
+              return errResult(
+                "thread_id and bot_id are required for thread-invite",
+              );
+            }
+            result = await client.invite(
+              params.thread_id,
+              params.bot_id,
+              params.label || undefined,
+            );
+            break;
+          }
+
+          // ─── Artifacts ──────────────────────────────────────
+          case "artifact-add": {
+            if (!params.thread_id || !params.artifact_key || !params.artifact_type) {
+              return errResult(
+                "thread_id, artifact_key, and artifact_type are required for artifact-add",
+              );
+            }
+            const artifact: any = { type: params.artifact_type };
+            if (params.title) artifact.title = params.title;
+            if (params.body) artifact.content = params.body;
+            if (params.url) artifact.url = params.url;
+            if (params.language) artifact.language = params.language;
+            result = await client.addArtifact(
+              params.thread_id,
+              params.artifact_key,
+              artifact,
+            );
+            break;
+          }
+
+          case "artifact-update": {
+            if (!params.thread_id || !params.artifact_key) {
+              return errResult(
+                "thread_id and artifact_key are required for artifact-update",
+              );
+            }
+            const updates: any = {};
+            if (params.body) updates.content = params.body;
+            if (params.title) updates.title = params.title;
+            if (Object.keys(updates).length === 0) {
+              return errResult("At least body or title is required for artifact-update");
+            }
+            result = await client.updateArtifact(
+              params.thread_id,
+              params.artifact_key,
+              updates,
+            );
+            break;
+          }
+
+          case "artifact-list": {
+            if (!params.thread_id) {
+              return errResult("thread_id is required for artifact-list");
+            }
+            result = await client.listArtifacts(params.thread_id);
+            break;
+          }
+
+          case "artifact-versions": {
+            if (!params.thread_id || !params.artifact_key) {
+              return errResult(
+                "thread_id and artifact_key are required for artifact-versions",
+              );
+            }
+            result = await client.getArtifactVersions(
+              params.thread_id,
+              params.artifact_key,
+            );
+            break;
+          }
+
+          // ─── Profile ────────────────────────────────────────
+          case "profile-update": {
+            const fields: any = {};
+            if (params.bio) fields.bio = params.bio;
+            if (params.role_text) fields.role = params.role_text;
+            if (params.team) fields.team = params.team;
+            if (params.status_text) fields.status_text = params.status_text;
+            if (params.timezone) fields.timezone = params.timezone;
+            if (Object.keys(fields).length === 0) {
+              return errResult(
+                "At least one field is required (bio, role_text, team, status_text, timezone)",
+              );
+            }
+            result = await client.updateProfile(fields);
+            break;
+          }
+
+          case "rename": {
+            if (!params.new_name) {
+              return errResult("new_name is required for rename");
+            }
+            result = await client.rename(params.new_name);
+            break;
+          }
+
+          // ─── Admin ──────────────────────────────────────────
+          case "role": {
+            if (!params.bot_id || !params.bot_role) {
+              return errResult(
+                "bot_id and bot_role (admin|member) are required for role",
+              );
+            }
+            result = await client.setBotRole(params.bot_id, params.bot_role);
+            break;
+          }
+
+          case "ticket-create": {
+            const opts: any = {};
+            if (params.reusable) opts.reusable = true;
+            if (params.expires_in) opts.expires_in = params.expires_in;
+            result = await client.createOrgTicket(opts);
+            break;
+          }
+
+          case "rotate-secret": {
+            result = await client.rotateOrgSecret();
+            break;
+          }
+
+          default:
+            return errResult(`Unknown command: ${params.command}`);
+        }
+
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+        };
+      } catch (err: any) {
+        const errObj: any = { error: err.message || String(err) };
+        if (err.status) errObj.status = err.status;
+        return {
+          content: [{ type: "text", text: JSON.stringify(errObj, null, 2) }],
+        };
+      }
+    },
+  });
+
+  api.logger.info("hxa-connect: registered agent tool 'hxa_connect'");
+}
+
+/** Helper to return a validation error from the tool. */
+function errResult(msg: string) {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ error: msg }) }],
+  };
+}
+
 // ─── Plugin entry ────────────────────────────────────────────
 const plugin = {
   id: "hxa-connect",
@@ -977,6 +1429,9 @@ const plugin = {
 
     // Register the channel
     api.registerChannel({ plugin: hxaConnectChannel });
+
+    // Register agent tools
+    registerTools(api);
 
     // Register HTTP routes for inbound webhooks (per-account)
     const hxa = resolveHxaConnectConfig(api.config);
@@ -996,7 +1451,7 @@ const plugin = {
     }
 
     api.logger.info(
-      `hxa-connect: plugin loaded (${Object.keys(accounts).length} account(s), WebSocket + webhook)`,
+      `hxa-connect: plugin loaded (${Object.keys(accounts).length} account(s), WebSocket + webhook + agent tools)`,
     );
   },
 };
