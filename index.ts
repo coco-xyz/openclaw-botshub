@@ -246,14 +246,19 @@ async function routeOutboundMessage(
   if (/^thread:/i.test(target)) {
     return sendToThread(acct, target.slice("thread:".length), text, options);
   }
-  // UUID — probe if it's a thread, fall back to DM
+  // UUID — probe if it's a thread; only fall back to DM on probe failure (404)
   if (UUID_RE.test(target)) {
+    let isThread = false;
     try {
       await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
-      return await sendToThread(acct, target, text, options);
+      isThread = true;
     } catch {
-      return await sendDM(acct, target, text);
+      // Probe failed — target is not a thread, treat as DM
     }
+    if (isThread) {
+      return await sendToThread(acct, target, text, options);
+    }
+    return await sendDM(acct, target, text);
   }
   // Channel ID
   if (CHANNEL_ID_RE.test(target) && target.length > 20) {
@@ -964,6 +969,7 @@ async function handleInboundWebhook(req: any, res: any) {
   let message_id: string | undefined;
   let chat_type: string | undefined;
   let group_name: string | undefined;
+  let reply_to_message: any | undefined;
 
   if (body.webhook_version === "1") {
     const msg = body.message;
@@ -972,6 +978,7 @@ async function handleInboundWebhook(req: any, res: any) {
     sender_id = msg?.sender_id;
     content = msg?.content;
     message_id = msg?.id;
+    reply_to_message = msg?.reply_to_message;
 
     if (channel_id && acct) {
       const channelInfo = await fetchChannelInfo(acct, channel_id);
@@ -993,6 +1000,7 @@ async function handleInboundWebhook(req: any, res: any) {
     message_id = body.message_id;
     chat_type = body.chat_type;
     group_name = body.group_name;
+    reply_to_message = body.reply_to_message;
   }
 
   if (!content || !sender_name) {
@@ -1034,6 +1042,14 @@ async function handleInboundWebhook(req: any, res: any) {
 
   console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
 
+  // Inject reply-to context (matching WS path behavior)
+  let finalContent = content;
+  if (reply_to_message) {
+    const replySender = (reply_to_message.sender_name || reply_to_message.sender_id || "unknown").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const replyContent = (reply_to_message.content || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    finalContent = `<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n${content}`;
+  }
+
   const dp = displayPrefix(matchedAccountId, cfg);
   const replyTarget = isGroup ? (channel_id || sender_name) : sender_name;
 
@@ -1042,11 +1058,16 @@ async function handleInboundWebhook(req: any, res: any) {
     accountId: matchedAccountId,
     senderName: sender_name,
     senderId: sender_id || sender_name,
-    content,
+    content: finalContent,
     messageId: message_id,
     chatType: isGroup ? "group" : "direct",
     groupSubject: isGroup ? (group_name || channel_id) : undefined,
     replyTarget,
+    replyToMessageId: message_id,
+    ...(reply_to_message ? {
+      replyToBody: reply_to_message.content || "",
+      replyToSender: reply_to_message.sender_name || reply_to_message.sender_id || "unknown",
+    } : {}),
     displayPrefix: dp,
   });
 
