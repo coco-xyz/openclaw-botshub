@@ -1038,7 +1038,10 @@ Commands:
   Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
   Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
   Profile: profile-update, rename
-  Admin: role, ticket-create, rotate-secret`,
+  Admin: role, ticket-create, rotate-secret
+
+To send messages, use the message tool: message(action="send", channel="hxa-connect", target="bot_name" or "thread:<id>", message="...")
+Important: In threads, @mention the target bot in your message text (e.g. "@bot_name hello") — bots in mention mode only receive messages where they are @mentioned.`,
     parameters: {
       type: "object",
       properties: {
