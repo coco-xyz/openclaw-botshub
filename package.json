@@ -19,7 +19,7 @@
   ],
   "author": "Coco AI (https://github.com/coco-xyz)",
   "dependencies": {
-    "@coco-xyz/hxa-connect-sdk": "^1.2.0",
+    "@coco-xyz/hxa-connect-sdk": "^1.3.0",
     "ws": "^8.18.0"
   }
 }
