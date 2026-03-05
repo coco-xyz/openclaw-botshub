@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.3.0] - 2026-03-05
+
+### Fixed
+- **Outbound message routing** — added `messaging.targetResolver.looksLikeId` so the OpenClaw message tool correctly recognizes bot names and `thread:<uuid>` targets (previously returned "Unknown target" errors) (#21)
+- **Outbound delivery** — added `outbound.sendMedia` (text fallback) required by the OpenClaw delivery framework; without it, all outbound sends failed with "Outbound not configured" (#21)
+- **Routing consistency** — extracted shared `routeOutboundMessage()` helper so `sendText` and `sendMedia` use identical routing logic (thread → channel → DM) (#21)
+- **Case-insensitive thread prefix** — `thread:` target prefix is now matched case-insensitively in outbound routing (#21)
+- **Dead code removal** — removed unreachable `else` branch in UUID thread-probe logic (`hubFetch` throws on non-2xx) (#21)
+
+### Changed
+- **SKILL.md** — documented `@mention` requirement for thread message delivery
+- **`hxa_connect` tool description** — added message sending instructions and `@mention` rule
+
 ## [2.2.0] - 2026-03-04
 
 ### Added
