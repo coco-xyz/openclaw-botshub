@@ -213,6 +213,33 @@ async function sendToThread(
   return { ok: true, messageId: result?.message?.id };
 }
 
+/** Route an outbound message to the correct destination (thread, channel, or DM). */
+async function routeOutboundMessage(
+  acct: HxaAccountConfig,
+  target: string,
+  text: string,
+): Promise<{ ok: boolean; messageId?: string }> {
+  // Case-insensitive thread: prefix
+  if (/^thread:/i.test(target)) {
+    return sendToThread(acct, target.slice("thread:".length), text);
+  }
+  // UUID — probe if it's a thread, fall back to DM
+  if (UUID_RE.test(target)) {
+    try {
+      await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
+      return await sendToThread(acct, target, text);
+    } catch {
+      return await sendDM(acct, target, text);
+    }
+  }
+  // Channel ID
+  if (CHANNEL_ID_RE.test(target) && target.length > 20) {
+    return sendToChannel(acct, target, text);
+  }
+  // Default: DM by bot name
+  return sendDM(acct, target, text);
+}
+
 /** Send a message to a specific channel by ID. */
 async function sendToChannel(
   acct: HxaAccountConfig,
@@ -778,29 +805,7 @@ const hxaConnectChannel = {
       accountId?: string;
     }) => {
       const acct = resolveAccountConfig(params.cfg, params.accountId);
-      const target = params.to;
-
-      let result;
-      if (target.startsWith("thread:")) {
-        result = await sendToThread(acct, target.slice("thread:".length), params.text);
-      } else if (UUID_RE.test(target)) {
-        // Might be a thread ID — try thread first, fall back to DM
-        try {
-          const resp = await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
-          if (resp.ok) {
-            result = await sendToThread(acct, target, params.text);
-          } else {
-            result = await sendDM(acct, target, params.text);
-          }
-        } catch {
-          result = await sendDM(acct, target, params.text);
-        }
-      } else if (CHANNEL_ID_RE.test(target) && target.length > 20) {
-        result = await sendToChannel(acct, target, params.text);
-      } else {
-        result = await sendDM(acct, target, params.text);
-      }
-
+      const result = await routeOutboundMessage(acct, params.to, params.text);
       return { channel: "hxa-connect" as const, ...result };
     },
     sendMedia: async (params: {
@@ -817,24 +822,7 @@ const hxaConnectChannel = {
       const acct = resolveAccountConfig(params.cfg, params.accountId);
       const target = params.to;
 
-      let result;
-      if (target.startsWith("thread:")) {
-        result = await sendToThread(acct, target.slice("thread:".length), text);
-      } else if (UUID_RE.test(target)) {
-        try {
-          const resp = await hubFetch(acct, `/api/threads/${target}`, { method: "GET" });
-          if (resp.ok) {
-            result = await sendToThread(acct, target, text);
-          } else {
-            result = await sendDM(acct, target, text);
-          }
-        } catch {
-          result = await sendDM(acct, target, text);
-        }
-      } else {
-        result = await sendDM(acct, target, text);
-      }
-
+      const result = await routeOutboundMessage(acct, target, text);
       return { channel: "hxa-connect" as const, ...result };
     },
   },
