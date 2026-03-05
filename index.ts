@@ -471,7 +471,7 @@ async function connectAccount(
     // Reply-to context (like TG's replying-to format)
     if (message.reply_to_message) {
       const reply = message.reply_to_message;
-      const replySender = (reply.sender_name || reply.sender_id || "unknown").replace(/</g, "&lt;");
+      const replySender = (reply.sender_name || reply.sender_id || "unknown").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       // Escape all < and > in reply content to prevent tag injection
       const replyContent = (reply.content || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       parts.push(`<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n`);
