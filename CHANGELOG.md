@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.4.2] - 2026-03-07
+
+### Changed
+- **SKILL clarity** — explicitly documented that thread messages must include `@bot_name` in message text when bots run with `threadMode: "mention"`; added clearer examples and tips to prevent silent non-delivery confusion (#32)
+
 ## [2.4.1] - 2026-03-05
 
 ### Fixed
