@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Gateway lifecycle contract** — keep `gateway.startAccount()` alive until abort instead of resolving immediately after WebSocket connect; add explicit `stopAccount()` cleanup so OpenClaw gateway no longer misclassifies healthy HXA-Connect accounts as stopped and auto-restarts them continuously (#35)
+
 ## [2.4.3] - 2026-03-09
 
 ### Changed

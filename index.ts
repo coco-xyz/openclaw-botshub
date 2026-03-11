@@ -905,15 +905,21 @@ const hxaConnectChannel = {
         }
       }
 
-      // Return cleanup function
-      return () => {
-        const conn = wsConnections.get(accountId);
-        if (conn) {
-          conn.disconnect();
-          wsConnections.delete(accountId);
-        }
-        log?.info?.(`hxa-connect: stopped account ${accountId}`);
-      };
+      // Keep the account task alive until the gateway aborts/stops it.
+      await new Promise<void>((resolve) => {
+        if (ctx.abortSignal?.aborted) return resolve();
+        ctx.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    stopAccount: async (ctx: any) => {
+      const accountId = ctx.accountId || "default";
+      const log = ctx.log;
+      const conn = wsConnections.get(accountId);
+      if (conn) {
+        conn.disconnect();
+        wsConnections.delete(accountId);
+      }
+      log?.info?.(`hxa-connect: stopped account ${accountId}`);
     },
   },
 };
