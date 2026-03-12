@@ -113,6 +113,17 @@ function migrateHxaConnectConfig(hxa: HxaConnectChannelConfig): HxaConnectChanne
   return next;
 }
 
+function migrateRootConfig(cfg: any): { next: any; changed: boolean } {
+  const next = structuredClone(cfg ?? {});
+  next.channels = next.channels || {};
+  const before = JSON.stringify(next.channels["hxa-connect"] ?? {});
+  next.channels["hxa-connect"] = migrateHxaConnectConfig(
+    (next.channels["hxa-connect"] ?? {}) as HxaConnectChannelConfig,
+  );
+  const after = JSON.stringify(next.channels["hxa-connect"] ?? {});
+  return { next, changed: before !== after };
+}
+
 /** Resolve all account configs, supporting both single and multi-account. */
 function resolveAccounts(hxa: HxaConnectChannelConfig): Record<string, HxaAccountConfig> {
   if (hxa.accounts && Object.keys(hxa.accounts).length > 0) {
@@ -1696,6 +1707,21 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     pluginRuntime = api.runtime;
+
+    void (async () => {
+      try {
+        const cfg = await api.runtime.config.loadConfig();
+        const { next, changed } = migrateRootConfig(cfg);
+        if (changed) {
+          await api.runtime.config.writeConfigFile(next);
+          api.logger.info("hxa-connect: persisted config migration for per-thread mode");
+        }
+      } catch (err: any) {
+        api.logger.error(
+          `hxa-connect: failed to persist config migration: ${err?.message || String(err)}`,
+        );
+      }
+    })();
 
     // Register the channel
     api.registerChannel({ plugin: hxaConnectChannel });
