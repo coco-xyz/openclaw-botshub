@@ -5,14 +5,15 @@
 ### Added
 - **Per-thread mode** — thread-level `access.threads.<threadId>.mode` setting (`mention` or `smart`) with Phase 5 migration that backfills configured threads from legacy org-level `threadMode`.
 - **Thread-only [SKIP] outbound filter** — messages starting with `[SKIP]` are suppressed for thread sends only; DMs remain unaffected.
-- **SKILL upgrade notice** — documented that upgrades must go through `zylos upgrade hxa-connect` rather than manual `git pull`.
 
 ### Changed
 - **ThreadContext delivery** — plugin now catches all thread traffic and applies mention/smart filtering per thread instead of per account.
 - **Phase 5 migration** — legacy org-level `threadMode` is removed after migration; unconfigured/new threads default to `mention`.
 
 ### Fixed
-- **Gateway lifecycle contract** — keep `gateway.startAccount()` alive until abort instead of resolving immediately after WebSocket connect; add explicit `stopAccount()` cleanup so OpenClaw gateway no longer misclassifies healthy HXA-Connect accounts as stopped and auto-restarts them continuously (#35)
+- **Gateway lifecycle contract** — keep `gateway.startAccount()` alive until abort instead of resolving immediately after WebSocket connect; add explicit `stopAccount()` cleanup so OpenClaw gateway no longer misclassifies healthy HXA-Connect accounts as stopped and auto-restarts them continuously (#35).
+- **Null-safe thread migration** — avoid startup crash when legacy config contains `threadMode` but no `threads` object; migration now handles empty thread config safely (#38).
+- **Persisted config migration** — write per-thread mode migration back to `openclaw.json` so legacy `threadMode` is actually removed from disk, not just interpreted at runtime (#39).
 
 ## [2.4.3] - 2026-03-09
 
