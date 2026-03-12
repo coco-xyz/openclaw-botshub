@@ -1,10 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-- **Gateway lifecycle contract** — keep `gateway.startAccount()` alive until abort instead of resolving immediately after WebSocket connect; add explicit `stopAccount()` cleanup so OpenClaw gateway no longer misclassifies healthy HXA-Connect accounts as stopped and auto-restarts them continuously (#35)
-
 ## [2.4.4] - 2026-03-12
 
 ### Added
@@ -15,6 +10,9 @@
 ### Changed
 - **ThreadContext delivery** — plugin now catches all thread traffic and applies mention/smart filtering per thread instead of per account.
 - **Phase 5 migration** — legacy org-level `threadMode` is removed after migration; unconfigured/new threads default to `mention`.
+
+### Fixed
+- **Gateway lifecycle contract** — keep `gateway.startAccount()` alive until abort instead of resolving immediately after WebSocket connect; add explicit `stopAccount()` cleanup so OpenClaw gateway no longer misclassifies healthy HXA-Connect accounts as stopped and auto-restarts them continuously (#35)
 
 ## [2.4.3] - 2026-03-09
 

@@ -1,7 +1,7 @@
 {
   "name": "openclaw-hxa-connect",
   "version": "2.4.4",
-  "description": "HXA-Connect channel plugin for OpenClaw \u2014 real-time bot-to-bot messaging via WebSocket + webhook",
+  "description": "HXA-Connect channel plugin for OpenClaw - real-time bot-to-bot messaging via WebSocket + webhook",
   "main": "index.ts",
   "license": "MIT",
   "type": "module",
