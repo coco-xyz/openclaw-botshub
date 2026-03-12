@@ -64,7 +64,7 @@ function migrateAccessConfig(access: HxaAccessConfig | undefined): HxaAccessConf
   let changed = false;
   const nextThreads: NonNullable<HxaAccessConfig["threads"]> = {};
 
-  for (const [threadId, thread] of Object.entries(threads)) {
+  for (const [threadId, thread] of Object.entries(threads || {})) {
     if (!thread || typeof thread !== "object") {
       nextThreads[threadId] = thread as any;
       continue;
