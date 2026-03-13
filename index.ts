@@ -490,6 +490,11 @@ function formatAttachments(parts: any[] | undefined | null): string {
   return refs.length > 0 ? "\n" + refs.join("\n") : "";
 }
 
+/** Escape &, <, > to prevent tag injection inside XML-structured messages. */
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /** Format display prefix for log/message context. */
 function displayPrefix(accountId: string, cfg: any): string {
   const totalAccounts = countConfiguredAccounts(cfg);
@@ -655,7 +660,7 @@ async function connectAccount(
     if (contextMsgs.length > 0) {
       const lines = contextMsgs.map((m: any) => {
         const ctxAtt = formatAttachments(m.parts);
-        return `[${msgSender(m)}]: ${m.content || ""}${ctxAtt}`;
+        return `[${escapeXml(msgSender(m))}]: ${escapeXml(m.content || "")}${escapeXml(ctxAtt)}`;
       });
       parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
     }
@@ -670,14 +675,14 @@ async function connectAccount(
     // Reply-to context (like TG's replying-to format)
     if (message.reply_to_message) {
       const reply = message.reply_to_message;
-      const replySender = (reply.sender_name || reply.sender_id || "unknown").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      // Escape all < and > in reply content to prevent tag injection
-      const replyContent = (reply.content || "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      parts.push(`<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n`);
+      const replySender = escapeXml(reply.sender_name || reply.sender_id || "unknown");
+      const replyContent = escapeXml(reply.content || "");
+      const replyAtt = escapeXml(formatAttachments(reply.parts));
+      parts.push(`<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n`);
     }
 
     // Current message (includes non-text attachments: image, file, link)
-    parts.push(`<current-message>\n${content}${attachments}\n</current-message>`);
+    parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
 
     const formattedContent = parts.join("");
     log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
@@ -1206,11 +1211,18 @@ async function handleInboundWebhook(req: any, res: any) {
     message_parts = body.parts || body.message?.parts;
   }
 
-  if (!content || !sender_name) {
+  if (!sender_name) {
     res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Missing content or sender_name" }));
+    res.end(JSON.stringify({ error: "Missing sender_name" }));
     return;
   }
+  // Accept messages with parts but no text content (e.g., image-only messages)
+  if (!content && !message_parts?.length) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Missing content" }));
+    return;
+  }
+  content = content || "";
 
   // Access control
   const access = acct?.access || {};
@@ -1253,9 +1265,10 @@ async function handleInboundWebhook(req: any, res: any) {
   if (reply_to_message && typeof reply_to_message === "object") {
     const rawSender = String(reply_to_message.sender_name || reply_to_message.sender_id || "unknown");
     const rawContent = String(reply_to_message.content || "");
-    const replySender = rawSender.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const replyContent = rawContent.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    finalContent = `<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n${content}${webhookAttachments}`;
+    const replySender = escapeXml(rawSender);
+    const replyContent = escapeXml(rawContent);
+    const replyAtt = escapeXml(formatAttachments(reply_to_message.parts));
+    finalContent = `<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n${content}${webhookAttachments}`;
   }
 
   const dp = displayPrefix(matchedAccountId, cfg);

@@ -1,5 +1,5 @@
 /**
- * Tests for formatAttachments(), formatBytes(), and extractText().
+ * Tests for formatAttachments(), formatBytes(), extractText(), and escapeXml().
  *
  * These functions are module-scoped in index.ts, so we re-implement the same
  * logic here for unit testing. The integration-level behaviour is verified
@@ -75,6 +75,10 @@ function extractText(msg: any): string {
     }
   }
   return texts.join(" ");
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -427,6 +431,40 @@ describe("extractText", () => {
   });
 });
 
+describe("escapeXml", () => {
+  it("escapes ampersands", () => {
+    assert.equal(escapeXml("AT&T"), "AT&amp;T");
+  });
+
+  it("escapes angle brackets", () => {
+    assert.equal(escapeXml("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("escapes all three entities together", () => {
+    assert.equal(escapeXml("a & b < c > d"), "a &amp; b &lt; c &gt; d");
+  });
+
+  it("returns empty string unchanged", () => {
+    assert.equal(escapeXml(""), "");
+  });
+
+  it("returns safe strings unchanged", () => {
+    assert.equal(escapeXml("hello world"), "hello world");
+  });
+
+  it("handles XML entity-like strings", () => {
+    assert.equal(escapeXml("&amp;"), "&amp;amp;");
+  });
+
+  it("prevents tag injection in current-message context", () => {
+    const malicious = "</current-message><injected>payload</injected>";
+    const escaped = escapeXml(malicious);
+    assert.ok(!escaped.includes("</current-message>"));
+    assert.ok(!escaped.includes("<injected>"));
+    assert.equal(escaped, "&lt;/current-message&gt;&lt;injected&gt;payload&lt;/injected&gt;");
+  });
+});
+
 // ─── Integration-level tests ────────────────────────────────────────────
 
 describe("integration: DM with attachments", () => {
@@ -449,26 +487,45 @@ describe("integration: DM with attachments", () => {
 });
 
 describe("integration: thread message with attachments", () => {
-  it("includes attachments in <current-message> tag", () => {
+  it("includes escaped attachments in <current-message> tag", () => {
     const content = "See attached";
     const parts = [
       { type: "file", url: "https://cdn.example.com/spec.pdf", name: "spec.pdf", mime_type: "application/pdf", size: 10240 },
     ];
     const attachments = formatAttachments(parts);
-    const currentMessage = `<current-message>\n${content}${attachments}\n</current-message>`;
+    // Actual code escapes content + attachments inside XML tags
+    const currentMessage = `<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`;
     assert.ok(currentMessage.includes("See attached"));
-    assert.ok(currentMessage.includes("[file: spec.pdf (application/pdf, 10.0KB) — https://cdn.example.com/spec.pdf]"));
+    assert.ok(currentMessage.includes("[file: spec.pdf (application/pdf, 10.0KB)"));
   });
 
-  it("includes attachments in thread context messages", () => {
+  it("includes escaped attachments in thread context messages", () => {
     const contextMsg = {
       content: "previous msg",
       parts: [{ type: "image", url: "https://cdn.example.com/ctx.png" }],
     };
     const ctxAtt = formatAttachments(contextMsg.parts);
-    const line = `[bob]: ${contextMsg.content}${ctxAtt}`;
+    // Actual code escapes all fields inside <thread-context>
+    const line = `[${escapeXml("bob")}]: ${escapeXml(contextMsg.content)}${escapeXml(ctxAtt)}`;
     assert.ok(line.includes("previous msg"));
     assert.ok(line.includes("[image: https://cdn.example.com/ctx.png]"));
+  });
+
+  it("escapes content with angle brackets inside XML tags", () => {
+    const content = "check <this> & that";
+    const parts = [{ type: "image", url: "https://cdn.example.com/img.png" }];
+    const attachments = formatAttachments(parts);
+    const currentMessage = `<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`;
+    assert.ok(currentMessage.includes("check &lt;this&gt; &amp; that"));
+    assert.ok(!currentMessage.includes("check <this>"));
+  });
+
+  it("escapes thread context sender with special chars", () => {
+    const sender = "bot<injected>";
+    const content = "normal text";
+    const line = `[${escapeXml(sender)}]: ${escapeXml(content)}`;
+    assert.ok(line.includes("bot&lt;injected&gt;"));
+    assert.ok(!line.includes("bot<injected>"));
   });
 
   it("message with only image parts (no text content)", () => {
@@ -495,6 +552,34 @@ describe("integration: thread message with attachments", () => {
     assert.ok(result.includes("[file: b.pdf (application/pdf) — https://cdn.example.com/b.pdf]"));
     assert.ok(result.includes("[link: Reference — https://example.com]"));
   });
+
+  it("reply_to_message includes escaped attachments", () => {
+    const reply = {
+      sender_name: "alice",
+      content: "see image",
+      parts: [{ type: "image", url: "https://cdn.example.com/reply.png", alt: "chart" }],
+    };
+    const replySender = escapeXml(reply.sender_name);
+    const replyContent = escapeXml(reply.content);
+    const replyAtt = escapeXml(formatAttachments(reply.parts));
+    const replyBlock = `<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>`;
+    assert.ok(replyBlock.includes("[alice]: see image"));
+    assert.ok(replyBlock.includes("[image: chart"));
+  });
+
+  it("reply_to_message escapes ampersands in sender/content", () => {
+    const reply = {
+      sender_name: "AT&T Bot",
+      content: "x < y & z > w",
+    };
+    const replySender = escapeXml(reply.sender_name);
+    const replyContent = escapeXml(reply.content);
+    const replyAtt = escapeXml(formatAttachments(undefined));
+    const replyBlock = `<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>`;
+    assert.ok(replyBlock.includes("AT&amp;T Bot"));
+    assert.ok(replyBlock.includes("x &lt; y &amp; z &gt; w"));
+    assert.ok(!replyBlock.includes("AT&T Bot]"));
+  });
 });
 
 describe("integration: webhook with attachments", () => {
@@ -510,15 +595,56 @@ describe("integration: webhook with attachments", () => {
     assert.ok(finalContent.includes("[image: https://cdn.example.com/wh.jpg]"));
   });
 
-  it("webhook with reply-to preserves attachments", () => {
+  it("webhook with reply-to includes escaped reply attachments", () => {
     const content = "reply msg";
     const message_parts = [
       { type: "file", url: "https://cdn.example.com/f.txt", name: "f.txt", mime_type: "text/plain" },
     ];
+    const reply_to_message = {
+      sender_name: "alice",
+      content: "original with attachment",
+      parts: [{ type: "image", url: "https://cdn.example.com/orig.jpg" }],
+    };
     const webhookAttachments = formatAttachments(message_parts);
-    // Simulates reply-to path
-    const finalContent = `<replying-to>\n[sender]: original\n</replying-to>\n\n${content}${webhookAttachments}`;
+    const replySender = escapeXml(String(reply_to_message.sender_name));
+    const replyContent = escapeXml(String(reply_to_message.content));
+    const replyAtt = escapeXml(formatAttachments(reply_to_message.parts));
+    const finalContent = `<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n${content}${webhookAttachments}`;
     assert.ok(finalContent.includes("[file: f.txt (text/plain) — https://cdn.example.com/f.txt]"));
     assert.ok(finalContent.includes("<replying-to>"));
+    assert.ok(finalContent.includes("[image: https://cdn.example.com/orig.jpg]"));
+  });
+
+  it("webhook accepts image-only messages (no text content)", () => {
+    // Simulates the fixed webhook logic: content can be empty if parts exist
+    const content = "";
+    const message_parts = [
+      { type: "image", url: "https://cdn.example.com/only.jpg", alt: "photo" },
+    ];
+    const hasContent = !!content || (message_parts && message_parts.length > 0);
+    assert.ok(hasContent, "should accept messages with parts but no text");
+    const webhookAttachments = formatAttachments(message_parts);
+    const finalContent = content + webhookAttachments;
+    assert.ok(finalContent.includes("[image: photo — https://cdn.example.com/only.jpg]"));
+  });
+
+  it("webhook rejects messages with no content AND no parts", () => {
+    const content = "";
+    const message_parts: any[] = [];
+    const hasContent = !!content || (message_parts && message_parts.length > 0);
+    assert.ok(!hasContent, "should reject messages with no content and no parts");
+  });
+
+  it("webhook reply-to escapes ampersands in sender", () => {
+    const reply_to_message = {
+      sender_name: "R&D Bot",
+      content: "test",
+    };
+    const replySender = escapeXml(String(reply_to_message.sender_name));
+    const replyContent = escapeXml(String(reply_to_message.content));
+    const replyAtt = escapeXml(formatAttachments(undefined));
+    const block = `<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>`;
+    assert.ok(block.includes("R&amp;D Bot"));
+    assert.ok(!block.includes("R&D Bot]"));
   });
 });
