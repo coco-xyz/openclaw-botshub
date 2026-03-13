@@ -432,6 +432,64 @@ interface WsConnection {
 
 const wsConnections = new Map<string, WsConnection>();
 
+// ─── Attachment Formatting ────────────────────────────────────
+
+function formatBytes(bytes: unknown): string {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "?B";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1048576).toFixed(1)}MB`;
+}
+
+// Format non-text message parts (image, file, link) as inline references.
+// Text/markdown parts are already captured via msg.content; json parts are
+// complex objects not suitable for inline display — both are skipped here.
+const MAX_ATTACHMENT_PARTS = 20;
+
+function formatAttachments(parts: any[] | undefined | null): string {
+  if (!parts || !parts.length) return "";
+  const refs: string[] = [];
+  let truncated = 0;
+  for (const part of parts) {
+    if (refs.length >= MAX_ATTACHMENT_PARTS) {
+      // Only count parts that would have produced a ref
+      if (part.type === "image" || part.type === "file" || part.type === "link"
+          || (part.type && part.url)) {
+        truncated++;
+      }
+      continue;
+    }
+    switch (part.type) {
+      case "image":
+        if (!part.url) break;
+        refs.push(part.alt
+          ? `[image: ${part.alt} — ${part.url}]`
+          : `[image: ${part.url}]`);
+        break;
+      case "file": {
+        if (!part.url || !part.name) break;
+        const size = part.size != null ? `, ${formatBytes(part.size)}` : "";
+        refs.push(`[file: ${part.name} (${part.mime_type || "application/octet-stream"}${size}) — ${part.url}]`);
+        break;
+      }
+      case "link":
+        if (!part.url) break;
+        refs.push(part.title
+          ? `[link: ${part.title} — ${part.url}]`
+          : `[link: ${part.url}]`);
+        break;
+      default:
+        // Forward-compat: surface unknown part types that carry a URL
+        if (part.type && part.url) {
+          refs.push(`[${part.type}: ${part.url}]`);
+        }
+        break;
+    }
+  }
+  if (truncated > 0) refs.push(`[... and ${truncated} more]`);
+  return refs.length > 0 ? "\n" + refs.join("\n") : "";
+}
+
 /** Format display prefix for log/message context. */
 function displayPrefix(accountId: string, cfg: any): string {
   const totalAccounts = countConfiguredAccounts(cfg);
@@ -497,6 +555,7 @@ async function connectAccount(
     const sender = msg.sender_name || "unknown";
     const content = msg.message?.content || msg.content || "";
     if (isSelf(msg.message?.sender_id, msg.message?.metadata)) return;
+    const attachments = formatAttachments(msg.message?.parts || msg.parts);
 
     if (!isDmAllowed(access, sender)) {
       log?.info?.(`${lp} DM from ${sender} rejected (dmPolicy: ${access.dmPolicy || "open"})`);
@@ -509,7 +568,7 @@ async function connectAccount(
       accountId,
       senderName: sender,
       senderId: msg.message?.sender_id || sender,
-      content,
+      content: content + attachments,
       messageId: msg.message?.id,
       chatType: "direct",
       replyTarget: sender,
@@ -534,16 +593,22 @@ async function connectAccount(
     "i",
   );
 
+  // Extract all searchable text from message (for mention detection).
+  // Includes text/markdown content PLUS alt text, filenames, titles from
+  // non-text parts so @mentions in those fields still trigger delivery.
   function extractText(msg: any): string {
-    const parts = [msg.content || ""];
+    const texts = [msg.content || ""];
     if (msg.parts) {
       for (const part of msg.parts) {
         if ("content" in part && typeof part.content === "string") {
-          parts.push(part.content);
+          texts.push(part.content);
         }
+        if (part.type === "image" && part.alt) texts.push(part.alt);
+        if (part.type === "file" && part.name) texts.push(part.name);
+        if (part.type === "link" && part.title) texts.push(part.title);
       }
     }
-    return parts.join(" ");
+    return texts.join(" ");
   }
 
   /** Display-friendly sender name (human provenance aware). */
@@ -562,6 +627,7 @@ async function connectAccount(
   threadCtx.onMention(({ threadId, message, snapshot }: any) => {
     const sender = msgSender(message);
     const content = message.content || "";
+    const attachments = formatAttachments(message.parts);
 
     if (!isThreadAllowed(access, threadId)) {
       log?.info?.(
@@ -587,7 +653,10 @@ async function connectAccount(
     // Thread context: previous messages (excluding trigger)
     const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
     if (contextMsgs.length > 0) {
-      const lines = contextMsgs.map((m: any) => `[${msgSender(m)}]: ${m.content || ""}`);
+      const lines = contextMsgs.map((m: any) => {
+        const ctxAtt = formatAttachments(m.parts);
+        return `[${msgSender(m)}]: ${m.content || ""}${ctxAtt}`;
+      });
       parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
     }
 
@@ -607,8 +676,8 @@ async function connectAccount(
       parts.push(`<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n`);
     }
 
-    // Current message
-    parts.push(`<current-message>\n${content}\n</current-message>`);
+    // Current message (includes non-text attachments: image, file, link)
+    parts.push(`<current-message>\n${content}${attachments}\n</current-message>`);
 
     const formattedContent = parts.join("");
     log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
@@ -1101,6 +1170,7 @@ async function handleInboundWebhook(req: any, res: any) {
   let chat_type: string | undefined;
   let group_name: string | undefined;
   let reply_to_message: any | undefined;
+  let message_parts: any[] | undefined;
 
   if (body.webhook_version === "1") {
     const msg = body.message;
@@ -1110,6 +1180,7 @@ async function handleInboundWebhook(req: any, res: any) {
     content = msg?.content;
     message_id = msg?.id;
     reply_to_message = msg?.reply_to_message;
+    message_parts = msg?.parts;
 
     if (channel_id && acct) {
       const channelInfo = await fetchChannelInfo(acct, channel_id);
@@ -1132,6 +1203,7 @@ async function handleInboundWebhook(req: any, res: any) {
     chat_type = body.chat_type;
     group_name = body.group_name;
     reply_to_message = body.reply_to_message;
+    message_parts = body.parts || body.message?.parts;
   }
 
   if (!content || !sender_name) {
@@ -1173,14 +1245,17 @@ async function handleInboundWebhook(req: any, res: any) {
 
   console.log(`[hxa-connect] inbound from ${sender_name}: ${content.slice(0, 100)}`);
 
+  // Format non-text attachments from message parts
+  const webhookAttachments = formatAttachments(message_parts);
+
   // Inject reply-to context (matching WS path behavior)
-  let finalContent = content;
+  let finalContent = content + webhookAttachments;
   if (reply_to_message && typeof reply_to_message === "object") {
     const rawSender = String(reply_to_message.sender_name || reply_to_message.sender_id || "unknown");
     const rawContent = String(reply_to_message.content || "");
     const replySender = rawSender.replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const replyContent = rawContent.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    finalContent = `<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n${content}`;
+    finalContent = `<replying-to>\n[${replySender}]: ${replyContent}\n</replying-to>\n\n${content}${webhookAttachments}`;
   }
 
   const dp = displayPrefix(matchedAccountId, cfg);
