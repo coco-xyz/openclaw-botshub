@@ -645,7 +645,7 @@ async function connectAccount(
       return;
     }
 
-    const isRealMention = mentionRe.test(extractText(message));
+    const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
     const threadMode = getThreadMode(threadId);
 
     if (threadMode === "mention" && !isRealMention) {
