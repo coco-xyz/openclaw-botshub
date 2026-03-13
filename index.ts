@@ -509,7 +509,8 @@ const MIME_TO_EXT: Record<string, string> = {
 };
 
 // Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
-const HUB_FILE_RE = /^\/api\/files\/(.+)$/;
+// [^?#]+ excludes query strings and fragments from the captured ID.
+const HUB_FILE_RE = /^\/api\/files\/([^?#]+)/;
 
 /**
  * Download media parts (image/file) from Hub to local filesystem.
@@ -526,7 +527,13 @@ async function downloadMediaParts(
   if (!parts || !parts.length) return {};
 
   const localPaths: Record<string, string> = {};
-  await fs.promises.mkdir(mediaDir, { recursive: true });
+
+  try {
+    await fs.promises.mkdir(mediaDir, { recursive: true });
+  } catch (err: any) {
+    console.warn(`${lp} Failed to create media dir ${mediaDir}: ${err.message}`);
+    return localPaths;
+  }
 
   for (const part of parts) {
     if (part.type !== "image" && part.type !== "file") continue;
@@ -545,7 +552,7 @@ async function downloadMediaParts(
       const filename = `${timestamp}-${safeId}${ext}`;
 
       const localPath = path.join(mediaDir, filename);
-      await fs.promises.writeFile(localPath, Buffer.from(result.buffer));
+      await fs.promises.writeFile(localPath, result.buffer);
 
       localPaths[part.url] = localPath;
       console.log(`${lp} Media saved: ${localPath} (${formatBytes(result.size)})`);
@@ -707,83 +714,87 @@ async function connectAccount(
   }
 
   threadCtx.onMention(async ({ threadId, message, snapshot }: any) => {
-    const sender = msgSender(message);
-    const content = message.content || "";
+    try {
+      const sender = msgSender(message);
+      const content = message.content || "";
 
-    if (!isThreadAllowed(access, threadId)) {
-      log?.info?.(
-        `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
-      );
-      return;
-    }
-    if (!isSenderAllowed(access, threadId, sender)) {
-      log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
-      return;
-    }
+      if (!isThreadAllowed(access, threadId)) {
+        log?.info?.(
+          `${lp} Thread ${threadId} rejected (groupPolicy: ${access.groupPolicy || "open"})`,
+        );
+        return;
+      }
+      if (!isSenderAllowed(access, threadId, sender)) {
+        log?.info?.(`${lp} Sender ${sender} rejected in thread ${threadId}`);
+        return;
+      }
 
-    const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
-    const threadMode = getThreadMode(threadId);
+      const isRealMention = mentionRe.test(extractText(message)) || !!message.mention_all;
+      const threadMode = getThreadMode(threadId);
 
-    if (threadMode === "mention" && !isRealMention) {
-      return;
-    }
+      if (threadMode === "mention" && !isRealMention) {
+        return;
+      }
 
-    // Download media for trigger message (after policy checks)
-    const localPaths = await downloadMediaParts(message.parts, client, mediaDir, lp);
-    const attachments = formatAttachments(message.parts, localPaths);
+      // Download media for trigger message (after policy checks)
+      const localPaths = await downloadMediaParts(message.parts, client, mediaDir, lp);
+      const attachments = formatAttachments(message.parts, localPaths);
 
-    // Build message with XML tags (consistent with Lark/TG format)
-    const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
+      // Build message with XML tags (consistent with Lark/TG format)
+      const parts: string[] = [`[${dp} Thread:${threadId}] ${sender} said: `];
 
-    // Thread context: previous messages (excluding trigger) — no media download for context
-    const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
-    if (contextMsgs.length > 0) {
-      const lines = contextMsgs.map((m: any) => {
-        const ctxAtt = formatAttachments(m.parts);
-        return `[${escapeXml(msgSender(m))}]: ${escapeXml(m.content || "")}${escapeXml(ctxAtt)}`;
+      // Thread context: previous messages (excluding trigger) — no media download for context
+      const contextMsgs = (snapshot.newMessages || []).filter((m: any) => m.id !== message.id);
+      if (contextMsgs.length > 0) {
+        const lines = contextMsgs.map((m: any) => {
+          const ctxAtt = formatAttachments(m.parts);
+          return `[${escapeXml(msgSender(m))}]: ${escapeXml(m.content || "")}${escapeXml(ctxAtt)}`;
+        });
+        parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
+      }
+
+      // Smart mode hint
+      if (!isRealMention && threadMode === "smart") {
+        parts.push(
+          "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
+        );
+      }
+
+      // Reply-to context (like TG's replying-to format)
+      if (message.reply_to_message) {
+        const reply = message.reply_to_message;
+        const replySender = escapeXml(reply.sender_name || reply.sender_id || "unknown");
+        const replyContent = escapeXml(reply.content || "");
+        const replyAtt = escapeXml(formatAttachments(reply.parts));
+        parts.push(`<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n`);
+      }
+
+      // Current message (includes non-text attachments with local paths when downloaded)
+      parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
+
+      const formattedContent = parts.join("");
+      log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
+
+      dispatchInbound({
+        cfg,
+        accountId,
+        senderName: sender,
+        senderId: message.sender_id || sender,
+        content: formattedContent,
+        messageId: message.id,
+        chatType: "group",
+        groupSubject: `thread:${threadId}`,
+        replyTarget: `thread:${threadId}`,
+        replyToMessageId: message.id,
+        ...(message.reply_to_message ? {
+          replyToBody: message.reply_to_message.content || "",
+          replyToSender: message.reply_to_message.sender_name || message.reply_to_message.sender_id || "unknown",
+        } : {}),
+        displayPrefix: dp,
       });
-      parts.push(`<thread-context>\n${lines.join("\n")}\n</thread-context>\n\n`);
+    } catch (err: any) {
+      console.error(`${lp} Thread handler error: ${err.message}`);
     }
-
-    // Smart mode hint
-    if (!isRealMention && threadMode === "smart") {
-      parts.push(
-        "<smart-mode>\nDecide whether to respond. Reply with exactly [SKIP] when a response is unnecessary.\n</smart-mode>\n\n",
-      );
-    }
-
-    // Reply-to context (like TG's replying-to format)
-    if (message.reply_to_message) {
-      const reply = message.reply_to_message;
-      const replySender = escapeXml(reply.sender_name || reply.sender_id || "unknown");
-      const replyContent = escapeXml(reply.content || "");
-      const replyAtt = escapeXml(formatAttachments(reply.parts));
-      parts.push(`<replying-to>\n[${replySender}]: ${replyContent}${replyAtt}\n</replying-to>\n\n`);
-    }
-
-    // Current message (includes non-text attachments with local paths when downloaded)
-    parts.push(`<current-message>\n${escapeXml(content)}${escapeXml(attachments)}\n</current-message>`);
-
-    const formattedContent = parts.join("");
-    log?.info?.(`${lp} Thread ${threadId} from ${sender} (${snapshot.bufferedCount} buffered)`);
-
-    dispatchInbound({
-      cfg,
-      accountId,
-      senderName: sender,
-      senderId: message.sender_id || sender,
-      content: formattedContent,
-      messageId: message.id,
-      chatType: "group",
-      groupSubject: `thread:${threadId}`,
-      replyTarget: `thread:${threadId}`,
-      replyToMessageId: message.id,
-      ...(message.reply_to_message ? {
-        replyToBody: message.reply_to_message.content || "",
-        replyToSender: message.reply_to_message.sender_name || message.reply_to_message.sender_id || "unknown",
-      } : {}),
-      displayPrefix: dp,
-    });
   });
 
   // Buffer thread messages (ThreadContext handles delivery via onMention)
