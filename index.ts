@@ -510,7 +510,7 @@ const MIME_TO_EXT: Record<string, string> = {
 
 // Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
 // [^?#]+ excludes query strings and fragments from the captured ID.
-const HUB_FILE_RE = /^\/api\/files\/([^?#]+)/;
+const HUB_FILE_RE = /^\/api\/files\/([^/?#]+)/;
 
 /**
  * Download media parts (image/file) from Hub to local filesystem.
@@ -545,7 +545,10 @@ async function downloadMediaParts(
     const fileId = match[1];
 
     try {
-      const result = await client.downloadFile(fileId);
+      const result = await client.downloadFile(fileId, {
+        maxBytes: 10 * 1024 * 1024, // 10 MB
+        timeout: 30_000,
+      });
       const ext = MIME_TO_EXT[result.contentType] || "";
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
       const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
@@ -1351,7 +1354,16 @@ async function handleInboundWebhook(req: any, res: any) {
   // Download media parts from Hub to local filesystem (same as WS path)
   const whLp = `[hxa-connect:${matchedAccountId}]`;
   let localPaths: Record<string, string> = {};
-  if (acct?.hubUrl && acct?.agentToken) {
+  const whConn = wsConnections.get(matchedAccountId);
+  if (whConn?.client) {
+    try {
+      const whMediaDir = path.join(getRuntime().dataDir, "media", matchedAccountId);
+      localPaths = await downloadMediaParts(message_parts, whConn.client, whMediaDir, whLp);
+    } catch (err: any) {
+      console.warn(`${whLp} Media download failed: ${err.message}`);
+    }
+  } else if (acct?.hubUrl && acct?.agentToken) {
+    // Fallback: create a one-off client if WS connection is not available
     try {
       const sdk = await import("@coco-xyz/hxa-connect-sdk");
       const whClient = new sdk.HxaConnectClient({
