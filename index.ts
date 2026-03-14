@@ -508,6 +508,17 @@ const MIME_TO_EXT: Record<string, string> = {
   "application/json": ".json",
 };
 
+/**
+ * Generate a local filename for a downloaded file.
+ * Sanitizes fileId to prevent path traversal and truncates to 16 chars.
+ */
+function generateFilename(fileId: string, contentType: string): string {
+  const ext = MIME_TO_EXT[contentType] || "";
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
+  return `${timestamp}-${safeId}${ext}`;
+}
+
 // Match Hub-internal file URLs: /api/files/<id> (ID is opaque — no format constraints)
 // [^?#]+ excludes query strings and fragments from the captured ID.
 const HUB_FILE_RE = /^\/api\/files\/([^/?#]+)/;
@@ -549,10 +560,7 @@ async function downloadMediaParts(
         maxBytes: 10 * 1024 * 1024, // 10 MB
         timeout: 30_000,
       });
-      const ext = MIME_TO_EXT[result.contentType] || "";
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 16);
-      const filename = `${timestamp}-${safeId}${ext}`;
+      const filename = generateFilename(fileId, result.contentType);
 
       const localPath = path.join(mediaDir, filename);
       await fs.promises.writeFile(localPath, result.buffer);
@@ -1438,6 +1446,7 @@ Commands:
   Query: peers, threads, thread, messages, profile, org, inbox
   Thread ops: thread-create, thread-update, thread-join, thread-leave, thread-invite
   Artifacts: artifact-add, artifact-update, artifact-list, artifact-versions
+  Media: download-file
   Profile: profile-update, rename
   Admin: role, ticket-create, rotate-secret, set-thread-mode, show-thread-mode
 
@@ -1470,6 +1479,7 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
             "role",
             "ticket-create",
             "rotate-secret",
+            "download-file",
             "set-thread-mode",
             "show-thread-mode",
           ],
@@ -1602,6 +1612,23 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
         expires_in: {
           type: "number",
           description: "Ticket expiry in seconds (for ticket-create)",
+        },
+        // Media params
+        file_id: {
+          type: "string",
+          description: "Hub file ID to download (for download-file)",
+        },
+        out_path: {
+          type: "string",
+          description: "Output file path (for download-file; auto-generated if omitted)",
+        },
+        max_bytes: {
+          type: "number",
+          description: "Maximum file size in bytes (for download-file; default 10 MB)",
+        },
+        timeout: {
+          type: "number",
+          description: "Download timeout in milliseconds (for download-file; default 30000)",
         },
       },
       required: ["command"],
@@ -1859,6 +1886,51 @@ Important: In threads, @mention the target bot in your message text (e.g. "@bot_
               accountId: params.account || "default",
               threadId: params.thread_id,
               mode: resolveThreadMode(cfg, params.account, params.thread_id),
+            };
+            break;
+          }
+
+          // ─── Media ──────────────────────────────────────────
+          case "download-file": {
+            if (!params.file_id) {
+              return errResult("file_id is required for download-file");
+            }
+            const maxBytes = params.max_bytes ?? 10 * 1024 * 1024;
+            const dlTimeout = params.timeout ?? 30_000;
+            if (typeof maxBytes === "number" && (!Number.isFinite(maxBytes) || maxBytes <= 0)) {
+              return errResult("max_bytes must be a positive number");
+            }
+            if (typeof dlTimeout === "number" && (!Number.isFinite(dlTimeout) || dlTimeout <= 0)) {
+              return errResult("timeout must be a positive number (milliseconds)");
+            }
+
+            const dlResult = await client.downloadFile(params.file_id, {
+              maxBytes,
+              timeout: dlTimeout,
+            });
+
+            let savedPath: string;
+            if (params.out_path) {
+              savedPath = path.resolve(params.out_path);
+              await fs.promises.mkdir(path.dirname(savedPath), { recursive: true });
+            } else {
+              const accountId = params.account || "default";
+              const dlMediaDir = path.join(getRuntime().dataDir, "media", accountId);
+              await fs.promises.mkdir(dlMediaDir, { recursive: true });
+              savedPath = path.join(dlMediaDir, generateFilename(params.file_id, dlResult.contentType));
+            }
+
+            await fs.promises.writeFile(savedPath, dlResult.buffer);
+
+            const baseUrl = (acct.hubUrl || "").replace(/\/+$/, "");
+            result = {
+              ok: true,
+              account: params.account || "default",
+              fileId: params.file_id,
+              contentType: dlResult.contentType,
+              size: dlResult.size,
+              savedPath,
+              sourceUrl: `${baseUrl}/api/files/${encodeURIComponent(params.file_id)}`,
             };
             break;
           }
