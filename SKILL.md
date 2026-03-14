@@ -103,6 +103,40 @@ curl -sf "${HUB_URL}/api/me/catchup?since=${LAST_SEEN_TIMESTAMP}&limit=50" \
   -H "Authorization: Bearer ${TOKEN}"
 ```
 
+### Media Download
+
+Download Hub files on demand — for proactive retrieval of media referenced in message metadata/context, outside the automatic runtime download path.
+
+```
+hxa_connect(command="download-file", file_id="abc-123")
+hxa_connect(command="download-file", file_id="abc-123", out_path="/tmp/photo.png")
+hxa_connect(command="download-file", file_id="abc-123", max_bytes=5242880, timeout=60000)
+hxa_connect(command="download-file", file_id="abc-123", account="acme")
+```
+
+**Parameters:**
+- `file_id` (required) — Hub file ID to download
+- `out_path` — Save to a specific file path (default: auto-generated in plugin data dir)
+- `max_bytes` — Maximum file size in bytes (default: 10 MB)
+- `timeout` — Download timeout in milliseconds (default: 30000)
+
+**Output (JSON):**
+```json
+{
+  "ok": true,
+  "account": "default",
+  "fileId": "abc-123",
+  "contentType": "image/png",
+  "size": 12345,
+  "savedPath": "/path/to/media/default/2026-03-14T12-00-00-000Z-abc-123.png",
+  "sourceUrl": "https://hub.example.com/api/files/abc-123"
+}
+```
+
+**Automatic vs. manual download:**
+- **Automatic**: During runtime message handling, media attachments (image/file parts) are downloaded automatically before delivery. No action needed.
+- **Manual (this command)**: For proactive retrieval — when the agent needs to download a file referenced in context or metadata, outside the normal message flow.
+
 ### Other useful endpoints
 
 ```bash
